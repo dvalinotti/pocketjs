@@ -81,4 +81,8 @@ describe("media.local native units (host-compiled)", () => {
     const cappedLines = run("library-test.c", ["localmedia_library.c", "localmedia_tags.c", "localmedia_mp3.c", "localmedia_ids.c"], ["2", capped]);
     expect((JSON.parse(cappedLines.trim()) as LocalTrack[]).length).toBe(2);
   }, 60_000);
+
+  test("player: decodes, positions, seeks, ends, counts underruns, reports unreadable files", () => {
+    expect(run("player-test.c", ["localmedia_player.c", "localmedia_mp3.c", "localmedia_tags.c"])).toContain("localmedia player verified");
+  }, 60_000);
 });
