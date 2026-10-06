@@ -21,6 +21,7 @@
 #include "qjs.h"
 #include "offload.h"
 #include "media.h"
+#include "localmedia.h"
 #include "offload_coverage.h"
 
 #include <stdlib.h>
@@ -52,6 +53,8 @@
 
 typedef enum {
   HostMediaOpen, HostMediaClose, HostMediaPaused, HostMediaVolume, HostMediaTexture, HostMediaStatus,
+  HostLocalScan, HostLocalTracks, HostLocalOpen, HostLocalPaused, HostLocalSeek, HostLocalVolume, HostLocalStatus,
+  HostLocalArtwork, HostLocalReleaseArtwork,
   HostOffloadSession, HostOffloadSubmit, HostOffloadTake, HostOffloadCoverage,
   HostCreateNode,
   HostDestroyNode,
@@ -274,6 +277,25 @@ static JSValue host_operation(
     case HostMediaStatus: {
       char status[640]; media_snapshot(status,sizeof status); return JS_NewString(ctx,status);
     }
+#endif
+#ifdef POCKETJS_LOCALMEDIA
+    case HostLocalScan: return JS_NewBool(ctx, localmedia_scan());
+    case HostLocalTracks: {
+      size_t length = 0;
+      const char *json = localmedia_tracks(&length);
+      return JS_NewStringLen(ctx, json, length);
+    }
+    case HostLocalOpen: return JS_NewInt32(ctx, localmedia_open(argument_int(ctx, argc, argv, 0)));
+    case HostLocalPaused: localmedia_paused(argc > 0 && JS_ToBool(ctx, argv[0])); return JS_UNDEFINED;
+    case HostLocalSeek: localmedia_seek(argument_float(ctx, argc, argv, 0)); return JS_UNDEFINED;
+    case HostLocalVolume: localmedia_volume(argument_float(ctx, argc, argv, 0)); return JS_UNDEFINED;
+    case HostLocalStatus: {
+      char status[512];
+      localmedia_status(status, sizeof status);
+      return JS_NewString(ctx, status);
+    }
+    case HostLocalArtwork: return JS_NewInt32(ctx, localmedia_artwork(argument_int(ctx, argc, argv, 0)));
+    case HostLocalReleaseArtwork: localmedia_release_artwork(argument_int(ctx, argc, argv, 0)); return JS_UNDEFINED;
 #endif
     case HostCreateNode:
       return JS_NewInt32(ctx, ui_create_node((uint32_t)argument_int(ctx, argc, argv, 0)));
@@ -649,6 +671,19 @@ static void install_host(void) {
   add_operation(media,"status",0,HostMediaStatus);
   JS_SetPropertyStr(context,global,"media",media);
 #endif
+#ifdef POCKETJS_LOCALMEDIA
+  JSValue localmedia = JS_NewObject(context);
+  add_operation(localmedia, "scan", 0, HostLocalScan);
+  add_operation(localmedia, "tracks", 0, HostLocalTracks);
+  add_operation(localmedia, "open", 1, HostLocalOpen);
+  add_operation(localmedia, "paused", 1, HostLocalPaused);
+  add_operation(localmedia, "seek", 1, HostLocalSeek);
+  add_operation(localmedia, "volume", 1, HostLocalVolume);
+  add_operation(localmedia, "status", 0, HostLocalStatus);
+  add_operation(localmedia, "artwork", 1, HostLocalArtwork);
+  add_operation(localmedia, "releaseArtwork", 1, HostLocalReleaseArtwork);
+  JS_SetPropertyStr(context, global, "localmedia", localmedia);
+#endif
 #ifdef POCKETJS_OFFLOAD
   JSValue offload = JS_NewObject(context);
   add_operation(offload, "uploadCoverage", 6, HostOffloadCoverage);
@@ -921,6 +956,9 @@ const char *qjs_last_error(void) {
 void qjs_shutdown(void) {
 #ifdef POCKETJS_MEDIA
   media_forget_guest();
+#endif
+#ifdef POCKETJS_LOCALMEDIA
+  localmedia_forget_guest();
 #endif
   if (context != NULL) {
     JS_FreeValue(context, frame_function);

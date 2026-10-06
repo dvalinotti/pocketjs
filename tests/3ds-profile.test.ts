@@ -104,6 +104,7 @@ describe("private Nintendo 3DS build profile", () => {
       capabilities: [
         "io.offload",
         "media.playback",
+        "media.local",
         "input.analog.left",
         "input.analog.right",
         "input.buttons",
@@ -121,9 +122,10 @@ describe("private Nintendo 3DS build profile", () => {
     // hostAbi is one sequence across every profile, private ones included:
     // 1 psp, 2 vita, 3 macos-widget, 4 symbian-e7-dev, 5 pocketbook,
     // 6 iphone2g-dev, 7 top-screen-only 3DS, 8 dual-screen 3DS,
-    // 9 Blackberry Classic, 10 companion media, 11 2D bodies (ui.physics).
+    // 9 Blackberry Classic, 10 companion media, 11 2D bodies (ui.physics),
+    // 12 on-device MP3 playback (media.local).
     // A collision would let a bundle mount on the wrong host.
-    expect(THREE_DS_DEV_HOST_ABI).toBe(11);
+    expect(THREE_DS_DEV_HOST_ABI).toBe(12);
     expect(
       Object.values(POCKET_TARGETS).map((profile) => profile.hostAbi),
     ).not.toContain(THREE_DS_DEV_HOST_ABI);

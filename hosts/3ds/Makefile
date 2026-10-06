@@ -84,7 +84,7 @@ CFLAGS := -Wall -Wextra -O2 -g -std=gnu11 -mword-relocations -ffunction-sections
   -DPOCKETJS_AUX_VIEW_W=$(POCKETJS_AUX_LOGICAL_WIDTH) \
   -DPOCKETJS_AUX_VIEW_H=$(POCKETJS_AUX_LOGICAL_HEIGHT) \
   -DPOCKETJS_RASTER_DENSITY=$(POCKETJS_RASTER_DENSITY) \
-  -I$(INCLUDE_DIR) -I$(POCKETJS_PICA_INCLUDE) -I$(BUILD) -I$(POCKETJS_QUICKJS_DIR) \
+  -I$(INCLUDE_DIR) -I$(CURDIR)/vendor -I$(POCKETJS_PICA_INCLUDE) -I$(BUILD) -I$(POCKETJS_QUICKJS_DIR) \
   -I$(DEVKITPRO)/libctru/include
 
 ifeq ($(POCKETJS_OFFLOAD),1)
@@ -93,6 +93,10 @@ endif
 
 ifeq ($(POCKETJS_MEDIA),1)
 CFLAGS += -DPOCKETJS_MEDIA
+endif
+
+ifeq ($(POCKETJS_LOCALMEDIA),1)
+CFLAGS += -DPOCKETJS_LOCALMEDIA
 endif
 
 ifeq ($(POCKETJS_CAPTURE),1)
@@ -107,7 +111,7 @@ LDFLAGS := -specs=3dsx.specs $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/pocketj
 LIBPATHS := -L$(DEVKITPRO)/libctru/lib
 LIBS := -lcitro3d -lctru -lm
 
-OBJECTS := $(BUILD)/main.o $(BUILD)/media.o $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/vshader_shbin.o
+OBJECTS := $(BUILD)/main.o $(BUILD)/media.o $(BUILD)/localmedia.o $(BUILD)/localmedia_ids.o $(BUILD)/localmedia_tags.o $(BUILD)/localmedia_mp3.o $(BUILD)/localmedia_art.o $(BUILD)/localmedia_library.o $(BUILD)/localmedia_player.o $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/vshader_shbin.o
 ELF := $(BUILD)/pocketjs-3ds.elf
 SMDH := $(BUILD)/pocketjs-3ds.smdh
 
@@ -155,6 +159,14 @@ $(BUILD)/offload.o: $(SOURCE)/offload.h $(SOURCE)/offload_queue.h
 $(BUILD)/qjs.o: $(SOURCE)/offload.h $(SOURCE)/offload_coverage.h
 $(BUILD)/media.o: $(SOURCE)/media.h $(SOURCE)/media_wire.h $(SOURCE)/media_adpcm.h
 $(BUILD)/main.o $(BUILD)/qjs.o $(BUILD)/gfx.o: $(SOURCE)/media.h
+$(BUILD)/main.o $(BUILD)/qjs.o: $(SOURCE)/localmedia.h
+$(BUILD)/localmedia.o: $(wildcard $(SOURCE)/localmedia*.h)
+$(BUILD)/localmedia_library.o: $(SOURCE)/localmedia_library.h $(SOURCE)/localmedia_ids.h $(SOURCE)/localmedia_tags.h $(SOURCE)/localmedia_mp3.h
+$(BUILD)/localmedia_player.o: $(SOURCE)/localmedia_player.h $(SOURCE)/localmedia_mp3.h $(SOURCE)/localmedia_tags.h $(CURDIR)/vendor/minimp3.h
+$(BUILD)/localmedia_art.o: $(SOURCE)/localmedia_art.h $(CURDIR)/vendor/stb_image.h
+$(BUILD)/localmedia_ids.o: $(SOURCE)/localmedia_ids.h
+$(BUILD)/localmedia_tags.o: $(SOURCE)/localmedia_tags.h
+$(BUILD)/localmedia_mp3.o: $(SOURCE)/localmedia_mp3.h
 
 $(ELF): $(OBJECTS) $(POCKETJS_CORE_LIB) $(POCKETJS_QUICKJS_DIR)/libquickjs.a
 	$(CC) $(LDFLAGS) $(OBJECTS) $(POCKETJS_CORE_LIB) $(POCKETJS_QUICKJS_DIR)/libquickjs.a \

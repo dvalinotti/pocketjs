@@ -34,6 +34,7 @@
 #include "qjs.h"
 #include "offload.h"
 #include "media.h"
+#include "localmedia.h"
 #include "devserver.h"
 #include "devmenu.h"
 #include "hbldr.h"
@@ -760,6 +761,9 @@ int main(void) {
 #ifdef POCKETJS_MEDIA
   if (!media_start()) { media_stop(); fail("Media worker allocation failed"); }
 #endif
+#ifdef POCKETJS_LOCALMEDIA
+  if (!localmedia_start()) { localmedia_stop(); fail("Local media allocation failed"); }
+#endif
 #ifdef POCKETJS_OFFLOAD
   GuestChoice guest = package_choice(embedded, 0, &runtime_state);
   guest.commit_on_accept = false;
@@ -1116,6 +1120,9 @@ int main(void) {
   offload_stop();
 #ifdef POCKETJS_MEDIA
   media_stop();
+#endif
+#ifdef POCKETJS_LOCALMEDIA
+  localmedia_stop();
 #endif
   input_shutdown();
   teardown_guest();

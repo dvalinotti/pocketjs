@@ -73,17 +73,22 @@ test("status and tracks are parsed and validated", () => {
   expect(LOCALMEDIA).toEqual({ version: 2, root: "sdmc:/music/", maxTracks: 2048, artMax: 128 });
 });
 
-test("media.local is a registered capability that the 3DS profile does not advertise yet", () => {
+const probeManifest = (requires: string[]) => ({
+  $schema: "https://pocketjs.dev/schema/pocket-2.json",
+  pocket: 2, id: "dev.example.probe", name: "probe", title: "Probe", version: "0.1.0",
+  engine: { capabilities: { requires: ["text.glyphs.baked", "input.buttons", "display.auxiliary", ...requires] } },
+  app: {
+    entry: "app/main.tsx", output: "probe-main", framework: "solid",
+    viewport: { fixed: { logical: [400, 240], presentation: "native" } },
+    surfaces: { auxiliary: { fixed: { logical: [320, 240], presentation: "native" } } },
+  },
+});
+
+test("the 3DS profile ships media.local", () => {
   expect(POCKET_CAPABILITIES).toContain("media.local");
-  const plan = resolve3dsBuildPlan({
-    $schema: "https://pocketjs.dev/schema/pocket-2.json",
-    pocket: 2, id: "dev.example.probe", name: "probe", title: "Probe", version: "0.1.0",
-    engine: { capabilities: { requires: ["text.glyphs.baked", "input.buttons", "display.auxiliary"], enhances: ["media.local"] } },
-    app: {
-      entry: "app/main.tsx", output: "probe-main", framework: "solid",
-      viewport: { fixed: { logical: [400, 240], presentation: "native" } },
-      surfaces: { auxiliary: { fixed: { logical: [320, 240], presentation: "native" } } },
-    },
-  });
-  expect(plan.features["media.local"]).toBe(false);
+  expect(resolve3dsBuildPlan(probeManifest(["media.local"])).features["media.local"]).toBe(true);
+});
+
+test("a 3DS app cannot declare both NDSP owners", () => {
+  expect(() => resolve3dsBuildPlan(probeManifest(["media.local", "media.playback"]))).toThrow("media.playback and media.local both drive NDSP");
 });
