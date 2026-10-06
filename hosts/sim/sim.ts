@@ -249,6 +249,7 @@ export async function bootWorld(
   g.audio = undefined; // audio module namespace: absent unless extraGlobals mounts one
   g.db = undefined; // db module namespace: absent unless extraGlobals mounts one
   g.fs = undefined; // fs module namespace: absent unless extraGlobals mounts one
+  g.localmedia = undefined; // local media module namespace: absent unless extraGlobals mounts one
   g.__pocketApp = app;
   g.__simHz = hz;
   g.__pocketEffectTrace = (e: EffectEvent) => effects.push(e);
@@ -332,6 +333,8 @@ export interface BundleOptions {
   viewport?: SimViewportOptions;
   /** The wasm core. Default: hosts/web/pocketjs.wasm of this PocketJS root. */
   wasm?: string;
+  /** Host module namespaces (e.g. `{ localmedia: host.ns }`), set on globalThis after the per-boot resets and before the bundle evaluates. */
+  extraGlobals?: Record<string, unknown>;
 }
 
 /** A guest exception: thrown while the bundle evaluated (`boot`) or inside a frame. */
@@ -510,12 +513,14 @@ export async function bootBundle(options: BundleOptions): Promise<BundleWorld> {
   g.audio = undefined;
   g.db = undefined;
   g.fs = undefined;
+  g.localmedia = undefined;
   g.__pocketApp = app;
   g.__simHz = hz;
   g.__pocketEffectTrace = (e: EffectEvent) => effects.push(e);
   g.__pocketEffectDriver = undefined;
   // No DevTools transport: the tree is read from the core, so the guest runs as it does in a browser realm.
   g.__pocketDevtoolsTransport = undefined;
+  if (options.extraGlobals) Object.assign(g, options.extraGlobals);
 
   const source = await Bun.file(options.js).text();
   try {

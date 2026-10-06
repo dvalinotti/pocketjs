@@ -187,4 +187,13 @@ describe("bootBundle", () => {
       /the wasm core is missing: .*absent\.wasm/,
     );
   });
+
+  test("extraGlobals mount host namespaces before the bundle runs, and the next boot starts without them", async () => {
+    const source = "console.log(typeof globalThis.localmedia, String(globalThis.probe));\nglobalThis.frame = function () {};";
+    const mounted = await bootBundle({ js: bundle("mounted", source), extraGlobals: { localmedia: {}, probe: 7 } });
+    expect(mounted.logs[0]!.text).toBe("object 7");
+    (globalThis as Record<string, unknown>).probe = undefined;
+    const bare = await bootBundle({ js: bundle("bare", source) });
+    expect(bare.logs[0]!.text).toBe("undefined undefined");
+  });
 });
