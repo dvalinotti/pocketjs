@@ -32,4 +32,8 @@ describe("media.local native units (host-compiled)", () => {
   test("mp3: frame table, Xing/Info/VBRI durations, estimates, TOC and linear seek, resync", () => {
     expect(run("mp3-test.c", ["localmedia_mp3.c"])).toContain("localmedia mp3 verified");
   }, 60_000);
+
+  test("art: crop and box scale, embedded JPEG and PNG, limits, unsync reads", () => {
+    expect(run("art-test.c", ["localmedia_art.c", "localmedia_tags.c"])).toContain("localmedia art verified");
+  }, 60_000);
 });
