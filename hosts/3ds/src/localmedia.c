@@ -17,7 +17,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define ROOT "sdmc:/music/"
+#ifndef LOCALMEDIA_ROOT
+#define LOCALMEDIA_ROOT "sdmc:/music/"
+#endif
+#define ROOT LOCALMEDIA_ROOT
 #define MAX_TRACKS 2048
 #define CHANNEL 0
 #define PREFILL_SLOTS 4
@@ -155,6 +158,8 @@ static const LmSink SINK = {NULL, sink_free, sink_data, sink_queue, sink_configu
 /* ---- audio thread ------------------------------------------------------------ */
 static LmPlayer player;
 static bool player_open;
+/* Underruns of the players closed so far: the status counts them for the session. */
+static unsigned closed_underruns;
 
 static bool current(unsigned generation) { return atomic_load(&running) && atomic_load(&requested) == generation; }
 
@@ -165,7 +170,7 @@ static void publish(unsigned generation, unsigned phase, unsigned error) {
   atomic_store(&work_error, error);
   atomic_store(&work_position, player_open ? lm_player_position(&player) : 0);
   if (player_open) atomic_store(&work_duration, lm_player_duration(&player));
-  atomic_store(&underruns, player.underruns);
+  atomic_store(&underruns, closed_underruns + (player_open ? player.underruns : 0));
   atomic_store_explicit(&published, generation, memory_order_release);
 }
 
@@ -176,13 +181,16 @@ static unsigned error_of(const char *message) {
 }
 
 static void close_player(void) {
-  if (player_open) lm_player_close(&player);
+  if (player_open) {
+    closed_underruns += player.underruns;
+    lm_player_close(&player);
+  }
   player_open = false;
 }
 
 static void audio_main(void *unused) {
   (void)unused;
-  unsigned generation = 0, phase = IDLE, handled_open = 0, handled_seek = 0;
+  unsigned generation = 0, phase = IDLE, error = ERR_NONE, handled_open = 0, handled_seek = 0;
   bool applied_paused = false;
   unsigned applied_volume = 100;
   uint64_t window_start = svcGetSystemTick(), window_decode = 0;
@@ -190,21 +198,22 @@ static void audio_main(void *unused) {
     /* Latest-wins: the newest open (or stop), then a seek newer than it. */
     Mail mail;
     mail_read(&open_mail, &mail);
-    bool restart = false;
+    bool restart = false, handled = false;
     if (mail.generation > handled_open) {
       handled_open = mail.generation;
       generation = mail.generation;
+      handled = true;
       close_player();
       phase = IDLE;
+      error = ERR_NONE;
       if (mail.path[0] == '\0') {
         /* stop */
       } else if (!audio_ok) {
-        unsigned code = audio_result == (Result)MAKERESULT(RL_PERMANENT, RS_NOTFOUND, RM_DSP, RD_NOT_FOUND) ? ERR_DSP_FIRMWARE : ERR_AUDIO;
         phase = FAILED;
-        publish(generation, FAILED, code);
+        error = audio_result == (Result)MAKERESULT(RL_PERMANENT, RS_NOTFOUND, RM_DSP, RD_NOT_FOUND) ? ERR_DSP_FIRMWARE : ERR_AUDIO;
       } else if (!lm_player_open(&player, &SINK, mail.path)) {
         phase = FAILED;
-        publish(generation, FAILED, error_of(player.message));
+        error = error_of(player.message);
       } else {
         player_open = true;
         restart = true;
@@ -214,6 +223,7 @@ static void audio_main(void *unused) {
     if (mail.generation > handled_seek && mail.generation > handled_open) {
       handled_seek = mail.generation;
       generation = mail.generation;
+      handled = true;
       if (player_open) { lm_player_seek(&player, mail.ms); restart = true; }
     }
     if (restart) {
@@ -221,8 +231,11 @@ static void audio_main(void *unused) {
       ndspChnSetPaused(CHANNEL, applied_paused);
       LmPump state = lm_player_pump(&player, PREFILL_SLOTS);
       phase = state == LM_PUMP_ERROR ? FAILED : state == LM_PUMP_ENDED ? ENDED : PLAYING;
-      publish(generation, phase, phase == FAILED ? error_of(player.message) : ERR_NONE);
+      error = phase == FAILED ? error_of(player.message) : ERR_NONE;
     }
+    /* Every handled command publishes, so its snapshot never outlives it (a failed open
+     * superseded by a seek still reaches "error"). */
+    if (handled) publish(generation, phase, error);
     bool paused = atomic_load(&paused_flag);
     if (paused != applied_paused) { ndspChnSetPaused(CHANNEL, paused); applied_paused = paused; }
     unsigned volume = atomic_load(&volume_percent);
@@ -234,8 +247,11 @@ static void audio_main(void *unused) {
       window_decode += player.decode_ticks - before;
       if (state == LM_PUMP_ENDED) phase = ENDED;
       else if (state == LM_PUMP_ERROR) phase = FAILED;
-      hurry = phase == PLAYING && !paused && lm_player_queued(&player) < PREFILL_SLOTS;
-      publish(generation, phase, phase == FAILED ? error_of(player.message) : ERR_NONE);
+      /* Hurry only while there is still audio to decode: at the end of the file the last
+       * slots drain on their own, and spinning here would starve the UI. */
+      hurry = phase == PLAYING && !paused && !player.eof && !player.error && lm_player_queued(&player) < PREFILL_SLOTS;
+      error = phase == FAILED ? error_of(player.message) : ERR_NONE;
+      publish(generation, phase, error);
     }
     uint64_t now = svcGetSystemTick();
     if (now - window_start >= SYSCLOCK_ARM11) {
