@@ -83,18 +83,52 @@ test("an undecodable file reaches error after loading; an unscanned id does not 
   expect(media.status().positionMs).toBe(0);
 });
 
-test("artwork handles exist only for tracks with art and stay live until released", () => {
+test("artwork is pending until time passes, exists only for tracks with art, and stays live until released", () => {
   const { host, media } = setup();
   media.scan();
+  expect(media.artwork(0)).toBe("pending");
+  expect(media.artwork(0)).toBe("pending");
+  expect(media.artwork(1)).toBe(0);
+  host.advance(16);
   const handle = media.artwork(0);
   expect(handle).toBeGreaterThan(0);
-  expect(media.artwork(1)).toBe(0);
-  expect(host.liveArtwork()).toEqual([handle]);
-  media.releaseArtwork(handle);
+  expect(host.liveArtwork()).toEqual([handle as number]);
+  expect(media.status().artHandles).toBe(1);
+  media.releaseArtwork(handle as number);
   expect(host.liveArtwork()).toEqual([]);
+  expect(media.status().artHandles).toBe(0);
   media.volume(0.25);
   expect(host.volume()).toBe(0.25);
-  expect(host.log).toEqual(["scan()", "artwork(0)", "artwork(1)", `releaseArtwork(${handle})`, "volume(0.25)"]);
+  expect(host.log).toEqual(["scan()", "artwork(0)", "artwork(0)", "artwork(1)", "artwork(0)", `releaseArtwork(${handle})`, "volume(0.25)"]);
+});
+
+test("a slow artwork decode stays pending for its virtual time; asking for another id abandons it", () => {
+  const { host, media } = setup({ artworkMs: 100 });
+  media.scan();
+  host.setLibrary([LIB[0]!, { ...LIB[1]!, art: true }]);
+  media.scan();
+  expect(media.artwork(0)).toBe("pending");
+  host.advance(60);
+  expect(media.artwork(0)).toBe("pending");
+  expect(media.artwork(1)).toBe("pending"); // abandons 0
+  host.advance(60);
+  expect(media.artwork(0)).toBe("pending"); // a fresh request
+  host.advance(100);
+  expect(media.artwork(0)).toBeGreaterThan(0);
+  expect(media.artwork(0)).toBe("pending"); // after hand-out, a new request
+  host.setDecodeLoad(37);
+  expect(media.status().decodeLoad).toBe(37);
+});
+
+test("a file that vanishes and returns gets its original id back", () => {
+  const host = createSimLocalMedia(LIB);
+  const media = localMedia(host.ns);
+  media.scan();
+  host.setLibrary([LIB[1]!]);
+  media.scan();
+  host.setLibrary([{ file: "new.mp3", durationMs: 10 }, LIB[0]!, LIB[1]!]);
+  media.scan();
+  expect(media.tracks().map((t) => [t.id, t.file])).toEqual([[3, "new.mp3"], [0, "01 Intro.mp3"], [1, "untagged.mp3"]]);
 });
 
 test("ids stay with their files across a rescan; new files get fresh ids; a vanished file does not open", () => {
@@ -109,5 +143,7 @@ test("ids stay with their files across a rescan; new files get fresh ids; a vani
   expect(media.open(2)).toBe(0);
   expect(media.open(3)).toBeGreaterThan(0);
   expect(media.status()).toMatchObject({ trackId: 3, durationMs: 500 });
+  expect(media.artwork(0)).toBe("pending");
+  host.advance(1);
   expect(media.artwork(0)).toBeGreaterThan(0);
 });

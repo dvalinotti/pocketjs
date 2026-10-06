@@ -13,13 +13,20 @@
  * the last, and every snapshot carries the serial of the open it describes.
  * A guest acts only on snapshots carrying the serial its latest open
  * returned, so a stale snapshot is ignored even when it names the same
- * track (repeat one). */
+ * track (repeat one).
+ *
+ * Artwork: artwork(id) never blocks. The first call for an id starts a decode
+ * off the UI thread and returns -1 (pending); a later call returns the texture
+ * handle once the decode finished, or 0 when the track has no art or it failed
+ * to decode. One request is in flight: asking for another id abandons the
+ * earlier one. A handle belongs to the guest until releaseArtwork(handle); a
+ * call for the same id after its handle was handed out starts a new request. */
 export const LOCALMEDIA = Object.freeze({
-  version: 1,
+  version: 2,
   /** Scanned non-recursively for *.mp3 (extension case-insensitive). */
   root: "sdmc:/music/",
   maxTracks: 2048,
-  /** Longest artwork edge after downscale; the texture is power-of-two. */
+  /** Edge of the square artwork texture: the picture is centre-cropped to a square, then scaled. */
   artMax: 128,
 });
 
@@ -27,8 +34,9 @@ export type LocalPhase = "idle" | "loading" | "playing" | "paused" | "ended" | "
 const PHASES: ReadonlySet<string> = new Set<LocalPhase>(["idle", "loading", "playing", "paused", "ended", "error"]);
 
 export interface LocalTrack {
-  /** Stable for the session per file: a rescan keeps a listed file's id and gives a new file the
-   * next unused id. Ids are not positions; tracks() lists in scan order. */
+  /** Stable for the session per file name: a rescan keeps a listed file's id, gives a new file the
+   * next unused id, and gives a file that returns after vanishing its original id. Ids are never
+   * reused for a different file. Ids are not positions; tracks() lists in scan order. */
   id: number;
   /** File name relative to LOCALMEDIA.root. */
   file: string;
@@ -38,7 +46,8 @@ export interface LocalTrack {
   album: string;
   /** Track number; 0 when unknown. */
   track: number;
-  /** 0 when unknown or the file does not decode. */
+  /** Exact when the file has a Xing/Info/VBRI header; otherwise estimated from the first frame's
+   * bitrate (exact for constant-bitrate files). 0 when unknown or the file does not decode. */
   durationMs: number;
   hasArt: boolean;
 }
@@ -57,6 +66,10 @@ export interface LocalStatus {
   scanGeneration: number;
   underruns: number;
   error: string;
+  /** Percent of real time the audio thread spent decoding over the last second (0..100). */
+  decodeLoad: number;
+  /** Artwork handles issued and not yet released. */
+  artHandles: number;
 }
 
 export interface LocalMediaOps {
@@ -74,7 +87,8 @@ export interface LocalMediaOps {
   volume(value: number): void;
   /** JSON LocalStatus. Non-blocking: no file, decoder or audio calls on the UI thread. */
   status(): string;
-  /** Texture handle of the track's embedded art at up to artMax × artMax; 0 when it has none or decoding failed. */
+  /** -1 while pending; a texture handle (> 0) of artMax × artMax art once decoded; 0 when the track
+   * has none, decoding failed, or the id is not in the last scan. Never blocks (see Artwork above). */
   artwork(id: number): number;
   releaseArtwork(handle: number): void;
 }
@@ -92,5 +106,6 @@ export function validLocalStatus(value: unknown): value is LocalStatus {
   return isObject(value) && typeof value.phase === "string" && PHASES.has(value.phase)
     && isInt(value.trackId, -1) && isInt(value.openSerial) && isInt(value.positionMs) && isInt(value.durationMs)
     && typeof value.scanning === "boolean" && isInt(value.scanGeneration)
-    && isInt(value.underruns) && typeof value.error === "string";
+    && isInt(value.underruns) && typeof value.error === "string"
+    && isInt(value.decodeLoad) && isInt(value.artHandles);
 }

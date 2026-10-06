@@ -4,7 +4,7 @@ import { POCKET_CAPABILITIES } from "../contracts/spec/platforms.ts";
 import { localMedia } from "../framework/src/localmedia.ts";
 import { resolve3dsBuildPlan } from "../tools/3ds-profile.ts";
 
-const STATUS: LocalStatus = { phase: "playing", trackId: 1, openSerial: 4, positionMs: 10, durationMs: 100, scanning: false, scanGeneration: 1, underruns: 0, error: "" };
+const STATUS: LocalStatus = { phase: "playing", trackId: 1, openSerial: 4, positionMs: 10, durationMs: 100, scanning: false, scanGeneration: 1, underruns: 0, error: "", decodeLoad: 12, artHandles: 1 };
 
 function recorder(over: Partial<LocalMediaOps> = {}) {
   const calls: string[] = [];
@@ -40,6 +40,16 @@ test("volume and seek are clamped before they cross; ids must be track ids", () 
   expect(() => media.artwork(-2)).toThrow("Invalid track id");
 });
 
+test("artwork -1 reads as pending; handles pass through", () => {
+  let next = -1;
+  const media = localMedia(recorder({ artwork: () => next }).ops);
+  expect(media.artwork(4)).toBe("pending");
+  next = 0;
+  expect(media.artwork(4)).toBe(0);
+  next = 9;
+  expect(media.artwork(4)).toBe(9);
+});
+
 test("artwork handle 0 means none and is never released", () => {
   const { calls, ops } = recorder();
   const media = localMedia(ops);
@@ -58,7 +68,9 @@ test("status and tracks are parsed and validated", () => {
   expect(validLocalStatus({ ...STATUS, trackId: -1 })).toBe(true);
   expect(validLocalStatus({ ...STATUS, openSerial: undefined })).toBe(false);
   expect(validLocalStatus({ ...STATUS, openSerial: -1 })).toBe(false);
-  expect(LOCALMEDIA).toEqual({ version: 1, root: "sdmc:/music/", maxTracks: 2048, artMax: 128 });
+  expect(validLocalStatus({ ...STATUS, decodeLoad: undefined })).toBe(false);
+  expect(validLocalStatus({ ...STATUS, artHandles: -1 })).toBe(false);
+  expect(LOCALMEDIA).toEqual({ version: 2, root: "sdmc:/music/", maxTracks: 2048, artMax: 128 });
 });
 
 test("media.local is a registered capability that the 3DS profile does not advertise yet", () => {

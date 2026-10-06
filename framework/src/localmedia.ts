@@ -9,6 +9,9 @@ import {
 export { LOCALMEDIA };
 export type { LocalMediaOps, LocalPhase, LocalStatus, LocalTrack } from "../../contracts/spec/localmedia.ts";
 
+/** A texture handle (> 0), 0 for no art, or "pending" while the host decodes it. */
+export type LocalArtwork = number | "pending";
+
 export interface LocalMedia {
   scan(): boolean;
   tracks(): LocalTrack[];
@@ -18,7 +21,7 @@ export interface LocalMedia {
   seek(ms: number): void;
   volume(value: number): void;
   status(): LocalStatus;
-  artwork(id: number): number;
+  artwork(id: number): LocalArtwork;
   releaseArtwork(handle: number): void;
 }
 
@@ -46,7 +49,10 @@ export function localMedia(ops = (globalThis as unknown as { localmedia?: LocalM
       if (!validLocalStatus(status)) throw new Error("Host returned a malformed status");
       return status;
     },
-    artwork: (id) => ops.artwork(trackId(id)),
+    artwork(id) {
+      const handle = ops.artwork(trackId(id));
+      return handle < 0 ? "pending" : handle;
+    },
     releaseArtwork(handle) {
       if (handle > 0) ops.releaseArtwork(handle);
     },

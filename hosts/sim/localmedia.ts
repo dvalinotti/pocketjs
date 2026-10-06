@@ -26,6 +26,9 @@ export interface SimLocalTrack {
 export interface SimLocalMediaOptions {
   /** Virtual time a scan takes. 0 (default) completes inside scan(). */
   scanMs?: number;
+  /** Virtual time an artwork decode takes; the handle is ready on the first advance() at least
+   * this long after the request. 0 (default): ready at the next advance(). */
+  artworkMs?: number;
 }
 
 export interface SimLocalMediaHost {
@@ -36,6 +39,8 @@ export interface SimLocalMediaHost {
   volume(): number;
   /** Artwork handles issued and not yet released. */
   liveArtwork(): number[];
+  /** The decodeLoad the status reports. */
+  setDecodeLoad(percent: number): void;
   /** Move the virtual clock. */
   advance(ms: number): void;
   /** Replace what the "card" holds; the next scan() lists it (ids stay with their files). */
@@ -55,6 +60,8 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
   const log: string[] = [];
   const art = new Set<number>();
   let nextArt = 1;
+  /** The one artwork request in flight: its id, virtual age and whether time has passed since. */
+  let artRequest: { id: number; age: number; advanced: boolean } | null = null;
   let volume = 1;
   let scanLeft = -1;
   let tracks: LocalTrack[] = [];
@@ -62,7 +69,7 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
   let serial = 0;
   const status: LocalStatus = {
     phase: "idle", trackId: -1, openSerial: 0, positionMs: 0, durationMs: 0,
-    scanning: false, scanGeneration: 0, underruns: 0, error: "",
+    scanning: false, scanGeneration: 0, underruns: 0, error: "", decodeLoad: 0, artHandles: 0,
   };
 
   const finishScan = () => {
@@ -133,13 +140,21 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
     artwork(id) {
       log.push(`artwork(${id})`);
       if (!tracks.find((t) => t.id === id)?.hasArt) return 0;
+      if (artRequest?.id !== id) {
+        artRequest = { id, age: 0, advanced: false };
+        return -1;
+      }
+      if (!artRequest.advanced || artRequest.age < (options.artworkMs ?? 0)) return -1;
+      artRequest = null;
       const handle = nextArt++;
       art.add(handle);
+      status.artHandles = art.size;
       return handle;
     },
     releaseArtwork(handle) {
       log.push(`releaseArtwork(${handle})`);
       art.delete(handle);
+      status.artHandles = art.size;
     },
   };
 
@@ -148,7 +163,14 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
     log,
     volume: () => volume,
     liveArtwork: () => [...art],
+    setDecodeLoad(percent) {
+      status.decodeLoad = percent;
+    },
     advance(ms) {
+      if (artRequest) {
+        artRequest.age += ms;
+        artRequest.advanced = true;
+      }
       if (scanLeft >= 0) {
         scanLeft -= ms;
         if (scanLeft <= 0) finishScan();
@@ -169,6 +191,7 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
     },
     dispose() {
       art.clear();
+      artRequest = null;
       tracks = [];
       log.length = 0;
     },
