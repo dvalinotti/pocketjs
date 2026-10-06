@@ -172,6 +172,7 @@ export function parse3dsArguments(
   let useConfig = true;
   const buildFlags: string[] = [];
   const cargoArgs: string[] = [];
+  const workingDirectory = options.workingDirectory ?? process.cwd();
 
   for (const a of argv) {
     if (a === "--capture") capture = true;
@@ -183,6 +184,9 @@ export function parse3dsArguments(
     else if (a.startsWith("--project-root=")) projectRoot = resolvePath(a.slice("--project-root=".length));
     else if (a.startsWith("--outdir=")) outputDir = resolvePath(a.slice("--outdir=".length)) + "/";
     else if (a.startsWith("--package-outdir=")) packageDir = resolvePath(a.slice("--package-outdir=".length));
+    else if (a.startsWith("--font-regular=")) buildFlags.push(`--font-regular=${resolvePath(workingDirectory, a.slice("--font-regular=".length))}`);
+    else if (a.startsWith("--font-bold=")) buildFlags.push(`--font-bold=${resolvePath(workingDirectory, a.slice("--font-bold=".length))}`);
+    else if (a.startsWith("--extra-chars=")) buildFlags.push(a);
     else if (a.startsWith("--config=")) {
       configFlagged = true;
       buildFlags.push(a);
@@ -213,7 +217,8 @@ export function parse3dsArguments(
 
 const USAGE =
   "usage: bun tools/3ds.ts <app> [--plan=<resolved-plan.json>] [--project-root=<dir>] " +
-  "[--outdir=<dir>] [--package-outdir=<dir>] [--skip-build] [--pocket-only] [--capture] [--cia] [cargo args…]   " +
+  "[--outdir=<dir>] [--package-outdir=<dir>] [--skip-build] [--pocket-only] [--capture] [--cia] " +
+  "[--font-regular=<path>] [--font-bold=<path>] [--extra-chars=<s>] [cargo args…]   " +
   "e.g. bun tools/3ds.ts 3ds-demo --cia";
 
 export interface CaptureDefines {
