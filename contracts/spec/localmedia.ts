@@ -27,7 +27,8 @@ export type LocalPhase = "idle" | "loading" | "playing" | "paused" | "ended" | "
 const PHASES: ReadonlySet<string> = new Set<LocalPhase>(["idle", "loading", "playing", "paused", "ended", "error"]);
 
 export interface LocalTrack {
-  /** Stable for the session: the track's index in scan order. */
+  /** Stable for the session per file: a rescan keeps a listed file's id and gives a new file the
+   * next unused id. Ids are not positions; tracks() lists in scan order. */
   id: number;
   /** File name relative to LOCALMEDIA.root. */
   file: string;
@@ -63,7 +64,8 @@ export interface LocalMediaOps {
   scan(): boolean;
   /** JSON LocalTrack[] of the last completed scan ("[]" before the first). */
   tracks(): string;
-  /** Stops the current track and starts id. Returns the open's serial (> 0), or 0 for an id the last scan did not list. */
+  /** Stops the current track and starts id. Returns the open's serial (> 0), or 0 for an id the last
+   * completed scan did not list (a file removed since is refused; the track playing keeps playing). */
   open(id: number): number;
   paused(value: boolean): void;
   /** Milliseconds; the host clamps to [0, durationMs]. */

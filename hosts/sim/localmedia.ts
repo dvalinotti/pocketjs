@@ -38,12 +38,20 @@ export interface SimLocalMediaHost {
   liveArtwork(): number[];
   /** Move the virtual clock. */
   advance(ms: number): void;
+  /** Replace what the "card" holds; the next scan() lists it (ids stay with their files). */
+  setLibrary(next: readonly SimLocalTrack[]): void;
   dispose(): void;
 }
 
 const stem = (file: string) => file.replace(/\.[^.]*$/, "");
 
-export function createSimLocalMedia(library: readonly SimLocalTrack[], options: SimLocalMediaOptions = {}): SimLocalMediaHost {
+export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: SimLocalMediaOptions = {}): SimLocalMediaHost {
+  let library = initial;
+  // Ids follow files for the life of the host: a rescan keeps a listed file's
+  // id and gives a new file the next unused one.
+  const idByFile = new Map<string, number>();
+  let nextId = 0;
+  const entryOf = new Map<number, SimLocalTrack>();
   const log: string[] = [];
   const art = new Set<number>();
   let nextArt = 1;
@@ -58,7 +66,15 @@ export function createSimLocalMedia(library: readonly SimLocalTrack[], options: 
   };
 
   const finishScan = () => {
-    tracks = library.slice(0, LOCALMEDIA.maxTracks).map((entry, id) => ({
+    entryOf.clear();
+    tracks = library.slice(0, LOCALMEDIA.maxTracks).map((entry) => {
+      let id = idByFile.get(entry.file);
+      if (id === undefined) {
+        id = nextId++;
+        idByFile.set(entry.file, id);
+      }
+      entryOf.set(id, entry);
+      return {
       id,
       file: entry.file,
       title: entry.title?.trim() || stem(entry.file),
@@ -67,7 +83,8 @@ export function createSimLocalMedia(library: readonly SimLocalTrack[], options: 
       track: entry.track ?? 0,
       durationMs: entry.corrupt ? 0 : entry.durationMs,
       hasArt: entry.art === true,
-    }));
+      };
+    });
     scanLeft = -1;
     status.scanning = false;
     status.scanGeneration++;
@@ -90,7 +107,7 @@ export function createSimLocalMedia(library: readonly SimLocalTrack[], options: 
     tracks: () => JSON.stringify(tracks),
     open(id) {
       log.push(`open(${id})`);
-      const track = tracks[id];
+      const track = tracks.find((t) => t.id === id);
       if (!track) return 0;
       serial++;
       Object.assign(status, { phase: "loading", trackId: id, openSerial: serial, durationMs: track.durationMs, error: "" });
@@ -115,7 +132,7 @@ export function createSimLocalMedia(library: readonly SimLocalTrack[], options: 
     status: () => JSON.stringify(status),
     artwork(id) {
       log.push(`artwork(${id})`);
-      if (!tracks[id]?.hasArt) return 0;
+      if (!tracks.find((t) => t.id === id)?.hasArt) return 0;
       const handle = nextArt++;
       art.add(handle);
       return handle;
@@ -137,7 +154,7 @@ export function createSimLocalMedia(library: readonly SimLocalTrack[], options: 
         if (scanLeft <= 0) finishScan();
       }
       if (status.phase === "loading") {
-        if (library[status.trackId]?.corrupt) Object.assign(status, { phase: "error", error: "MP3 frame sync not found" });
+        if (entryOf.get(status.trackId)?.corrupt) Object.assign(status, { phase: "error", error: "MP3 frame sync not found" });
         else status.phase = "playing";
         return;
       }
@@ -146,6 +163,9 @@ export function createSimLocalMedia(library: readonly SimLocalTrack[], options: 
         setPosition(status.durationMs);
         status.phase = "ended";
       } else setPosition(position + ms);
+    },
+    setLibrary(next) {
+      library = next;
     },
     dispose() {
       art.clear();

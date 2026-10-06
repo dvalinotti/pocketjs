@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { LOCALMEDIA, validLocalStatus, validLocalTrack, type LocalMediaOps } from "../contracts/spec/localmedia.ts";
+import { LOCALMEDIA, validLocalStatus, validLocalTrack, type LocalMediaOps, type LocalStatus } from "../contracts/spec/localmedia.ts";
 import { POCKET_CAPABILITIES } from "../contracts/spec/platforms.ts";
 import { localMedia } from "../framework/src/localmedia.ts";
 import { resolve3dsBuildPlan } from "../tools/3ds-profile.ts";
 
-const STATUS = { phase: "playing", trackId: 1, openSerial: 4, positionMs: 10, durationMs: 100, scanning: false, scanGeneration: 1, underruns: 0, error: "" };
+const STATUS: LocalStatus = { phase: "playing", trackId: 1, openSerial: 4, positionMs: 10, durationMs: 100, scanning: false, scanGeneration: 1, underruns: 0, error: "" };
 
 function recorder(over: Partial<LocalMediaOps> = {}) {
   const calls: string[] = [];

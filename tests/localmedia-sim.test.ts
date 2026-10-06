@@ -96,3 +96,18 @@ test("artwork handles exist only for tracks with art and stay live until release
   expect(host.volume()).toBe(0.25);
   expect(host.log).toEqual(["scan()", "artwork(0)", "artwork(1)", `releaseArtwork(${handle})`, "volume(0.25)"]);
 });
+
+test("ids stay with their files across a rescan; new files get fresh ids; a vanished file does not open", () => {
+  const host = createSimLocalMedia(LIB);
+  const media = localMedia(host.ns);
+  media.scan();
+  expect(media.tracks().map((t) => [t.id, t.file])).toEqual([[0, "01 Intro.mp3"], [1, "untagged.mp3"], [2, "broken.mp3"]]);
+  host.setLibrary([{ file: "00 New.mp3", durationMs: 500 }, LIB[1]!, LIB[0]!]);
+  media.scan();
+  expect(media.status().scanGeneration).toBe(2);
+  expect(media.tracks().map((t) => [t.id, t.file])).toEqual([[3, "00 New.mp3"], [1, "untagged.mp3"], [0, "01 Intro.mp3"]]);
+  expect(media.open(2)).toBe(0);
+  expect(media.open(3)).toBeGreaterThan(0);
+  expect(media.status()).toMatchObject({ trackId: 3, durationMs: 500 });
+  expect(media.artwork(0)).toBeGreaterThan(0);
+});
