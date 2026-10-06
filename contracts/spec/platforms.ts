@@ -183,6 +183,13 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // Native encoded-media playback with bounded worker handoff, audio clock,
   // pause/volume, texture output and observable decoder availability.
   "media.playback",
+  // Encoded audio from the device's own storage behind the local media
+  // module's namespace (`globalThis.localmedia`, contracts/spec/localmedia.ts):
+  // directory scan, tags, decode, seek and artwork stay in a native worker;
+  // the guest sends commands and reads a JSON status snapshot. The sim host
+  // implements the contract (hosts/sim/localmedia.ts); a device target
+  // appends the id to its profile when its native host ships the module.
+  "media.local",
   // Bounded whole-response HTTP through `fetch()` and the net module's own
   // namespace (`globalThis.net`, contracts/spec/net.ts). Transport adapters
   // remain host-owned; the browser dev host, deterministic sim and reference

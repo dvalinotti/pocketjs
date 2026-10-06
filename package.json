@@ -185,6 +185,7 @@
     "./media": "./framework/src/media.ts",
     "./media/provider": "./tools/media-stream.ts",
     "./media/audio": "./contracts/spec/media-adpcm.ts",
+    "./localmedia": "./framework/src/localmedia.ts",
     "./clock": "./framework/src/clock.ts",
     "./config": "./framework/src/config.ts",
     "./db": "./framework/src/db-api.ts",
