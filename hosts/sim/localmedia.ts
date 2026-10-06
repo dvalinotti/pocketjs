@@ -51,8 +51,9 @@ export function createSimLocalMedia(library: readonly SimLocalTrack[], options: 
   let scanLeft = -1;
   let tracks: LocalTrack[] = [];
   let position = 0;
+  let serial = 0;
   const status: LocalStatus = {
-    phase: "idle", trackId: -1, positionMs: 0, durationMs: 0,
+    phase: "idle", trackId: -1, openSerial: 0, positionMs: 0, durationMs: 0,
     scanning: false, scanGeneration: 0, underruns: 0, error: "",
   };
 
@@ -90,10 +91,11 @@ export function createSimLocalMedia(library: readonly SimLocalTrack[], options: 
     open(id) {
       log.push(`open(${id})`);
       const track = tracks[id];
-      if (!track) return false;
-      Object.assign(status, { phase: "loading", trackId: id, durationMs: track.durationMs, error: "" });
+      if (!track) return 0;
+      serial++;
+      Object.assign(status, { phase: "loading", trackId: id, openSerial: serial, durationMs: track.durationMs, error: "" });
       setPosition(0);
-      return true;
+      return serial;
     },
     paused(value) {
       log.push(`paused(${value})`);

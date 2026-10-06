@@ -4,14 +4,14 @@ import { POCKET_CAPABILITIES } from "../contracts/spec/platforms.ts";
 import { localMedia } from "../framework/src/localmedia.ts";
 import { resolve3dsBuildPlan } from "../tools/3ds-profile.ts";
 
-const STATUS = { phase: "playing", trackId: 1, positionMs: 10, durationMs: 100, scanning: false, scanGeneration: 1, underruns: 0, error: "" };
+const STATUS = { phase: "playing", trackId: 1, openSerial: 4, positionMs: 10, durationMs: 100, scanning: false, scanGeneration: 1, underruns: 0, error: "" };
 
 function recorder(over: Partial<LocalMediaOps> = {}) {
   const calls: string[] = [];
   const ops: LocalMediaOps = {
     scan: () => (calls.push("scan"), true),
     tracks: () => "[]",
-    open: (id) => (calls.push(`open ${id}`), true),
+    open: (id) => (calls.push(`open ${id}`), 7),
     paused: (v) => void calls.push(`paused ${v}`),
     seek: (ms) => void calls.push(`seek ${ms}`),
     volume: (v) => void calls.push(`volume ${v}`),
@@ -33,7 +33,8 @@ test("volume and seek are clamped before they cross; ids must be track ids", () 
   media.volume(2); media.volume(-1); media.volume(NaN);
   media.seek(-5); media.seek(12.6); media.seek(Infinity);
   media.pause(true);
-  expect(calls).toEqual(["volume 1", "volume 0", "volume 0", "seek 0", "seek 13", "seek 0", "paused true"]);
+  expect(media.open(2)).toBe(7);
+  expect(calls).toEqual(["volume 1", "volume 0", "volume 0", "seek 0", "seek 13", "seek 0", "paused true", "open 2"]);
   expect(() => media.open(-1)).toThrow("Invalid track id");
   expect(() => media.open(1.5)).toThrow("Invalid track id");
   expect(() => media.artwork(-2)).toThrow("Invalid track id");
@@ -55,6 +56,8 @@ test("status and tracks are parsed and validated", () => {
   expect(validLocalTrack({ id: 0, file: "a.mp3", title: "A", artist: "B", album: "C", track: 0, durationMs: 0, hasArt: false })).toBe(true);
   expect(validLocalStatus({ ...STATUS, trackId: -2 })).toBe(false);
   expect(validLocalStatus({ ...STATUS, trackId: -1 })).toBe(true);
+  expect(validLocalStatus({ ...STATUS, openSerial: undefined })).toBe(false);
+  expect(validLocalStatus({ ...STATUS, openSerial: -1 })).toBe(false);
   expect(LOCALMEDIA).toEqual({ version: 1, root: "sdmc:/music/", maxTracks: 2048, artMax: 128 });
 });
 

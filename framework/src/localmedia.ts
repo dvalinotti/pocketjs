@@ -12,7 +12,8 @@ export type { LocalMediaOps, LocalPhase, LocalStatus, LocalTrack } from "../../c
 export interface LocalMedia {
   scan(): boolean;
   tracks(): LocalTrack[];
-  open(id: number): boolean;
+  /** The open's serial (> 0), or 0 when the host refused the id. */
+  open(id: number): number;
   pause(value: boolean): void;
   seek(ms: number): void;
   volume(value: number): void;

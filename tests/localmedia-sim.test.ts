@@ -40,8 +40,9 @@ test("a timed scan reports scanning until its virtual time passes", () => {
 test("every command is visible in the next status read", () => {
   const { host, media } = setup();
   media.scan();
-  expect(media.open(0)).toBe(true);
-  expect(media.status()).toMatchObject({ phase: "loading", trackId: 0, positionMs: 0, durationMs: 1000 });
+  expect(media.status().openSerial).toBe(0);
+  expect(media.open(0)).toBe(1);
+  expect(media.status()).toMatchObject({ phase: "loading", trackId: 0, openSerial: 1, positionMs: 0, durationMs: 1000 });
   host.advance(16);
   expect(media.status()).toMatchObject({ phase: "playing", positionMs: 0 });
   host.advance(400);
@@ -55,8 +56,8 @@ test("every command is visible in the next status read", () => {
   expect(media.status()).toMatchObject({ phase: "playing", positionMs: 1000 });
   host.advance(1);
   expect(media.status()).toMatchObject({ phase: "ended", positionMs: 1000 });
-  media.open(0);
-  expect(media.status()).toMatchObject({ phase: "loading", trackId: 0, positionMs: 0 });
+  expect(media.open(0)).toBe(2);
+  expect(media.status()).toMatchObject({ phase: "loading", trackId: 0, openSerial: 2, positionMs: 0 });
 });
 
 test("a seek on an ended track pauses it at the target", () => {
@@ -73,8 +74,8 @@ test("a seek on an ended track pauses it at the target", () => {
 test("an undecodable file reaches error after loading; an unscanned id does not open", () => {
   const { host, media } = setup();
   media.scan();
-  expect(media.open(7)).toBe(false);
-  expect(media.status().trackId).toBe(-1);
+  expect(media.open(7)).toBe(0);
+  expect(media.status()).toMatchObject({ trackId: -1, openSerial: 0 });
   media.open(2);
   host.advance(16);
   expect(media.status()).toMatchObject({ phase: "error", trackId: 2, error: "MP3 frame sync not found" });
