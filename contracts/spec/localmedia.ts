@@ -62,8 +62,11 @@ export interface LocalStatus {
   durationMs: number;
   /** A scan is running; independent of the playback phase. */
   scanning: boolean;
-  /** Completed scans; 0 before the first finishes. A change means tracks() has a new list. */
+  /** Completed lists; 0 before the first. A change means tracks() has a new list. A scan may complete
+   * more than one: the list from the scan cache first (while `scanning` stays true), then the confirmed one. */
   scanGeneration: number;
+  /** Milliseconds the last completed scan took to walk the folder; 0 before the first. */
+  scanMs: number;
   underruns: number;
   error: string;
   /** Percent of real time the audio thread spent decoding over the last second (0..100). */
@@ -105,7 +108,7 @@ export function validLocalTrack(value: unknown): value is LocalTrack {
 export function validLocalStatus(value: unknown): value is LocalStatus {
   return isObject(value) && typeof value.phase === "string" && PHASES.has(value.phase)
     && isInt(value.trackId, -1) && isInt(value.openSerial) && isInt(value.positionMs) && isInt(value.durationMs)
-    && typeof value.scanning === "boolean" && isInt(value.scanGeneration)
+    && typeof value.scanning === "boolean" && isInt(value.scanGeneration) && isInt(value.scanMs)
     && isInt(value.underruns) && typeof value.error === "string"
     && isInt(value.decodeLoad) && isInt(value.artHandles);
 }

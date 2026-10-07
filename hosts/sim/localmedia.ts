@@ -29,6 +29,9 @@ export interface SimLocalMediaOptions {
   /** Virtual time an artwork decode takes; the handle is ready on the first advance() at least
    * this long after the request. 0 (default): ready at the next advance(). */
   artworkMs?: number;
+  /** A scan cache left by an earlier session: the first scan publishes it before the folder's list.
+   * Later scans publish the previous scan's list first, as the native host does. */
+  cached?: readonly SimLocalTrack[];
 }
 
 export interface SimLocalMediaHost {
@@ -69,12 +72,14 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
   let serial = 0;
   const status: LocalStatus = {
     phase: "idle", trackId: -1, openSerial: 0, positionMs: 0, durationMs: 0,
-    scanning: false, scanGeneration: 0, underruns: 0, error: "", decodeLoad: 0, artHandles: 0,
+    scanning: false, scanGeneration: 0, scanMs: 0, underruns: 0, error: "", decodeLoad: 0, artHandles: 0,
   };
+  /** What the scan cache holds: published first by the next scan. */
+  let cache: readonly SimLocalTrack[] | null = options.cached ?? null;
 
-  const finishScan = () => {
+  const publish = (list: readonly SimLocalTrack[]) => {
     entryOf.clear();
-    tracks = library.slice(0, LOCALMEDIA.maxTracks).map((entry) => {
+    tracks = list.slice(0, LOCALMEDIA.maxTracks).map((entry) => {
       let id = idByFile.get(entry.file);
       if (id === undefined) {
         id = nextId++;
@@ -92,9 +97,14 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
       hasArt: entry.art === true,
       };
     });
+    status.scanGeneration++;
+  };
+  const finishScan = () => {
+    publish(library);
+    cache = library;
     scanLeft = -1;
     status.scanning = false;
-    status.scanGeneration++;
+    status.scanMs = Math.max(0, options.scanMs ?? 0);
   };
   const setPosition = (ms: number) => {
     position = ms;
@@ -106,6 +116,7 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
       log.push("scan()");
       if (status.scanning) return false;
       status.scanning = true;
+      if (cache) publish(cache);
       const scanMs = options.scanMs ?? 0;
       if (scanMs <= 0) finishScan();
       else scanLeft = scanMs;

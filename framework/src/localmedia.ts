@@ -33,6 +33,9 @@ function trackId(value: number): number {
 /** The host's local media module (capability media.local). */
 export function localMedia(ops = (globalThis as unknown as { localmedia?: LocalMediaOps }).localmedia): LocalMedia {
   if (!ops) throw new Error("Host does not implement media.local");
+  // status() is read every frame: an unchanged reply returns the previous object, unparsed.
+  let lastRaw = "";
+  let lastStatus: LocalStatus | null = null;
   return {
     scan: () => ops.scan(),
     tracks() {
@@ -45,8 +48,12 @@ export function localMedia(ops = (globalThis as unknown as { localmedia?: LocalM
     seek: (ms) => ops.seek(Number.isFinite(ms) ? Math.max(0, Math.round(ms)) : 0),
     volume: (value) => ops.volume(Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0),
     status() {
-      const status = JSON.parse(ops.status()) as unknown;
+      const raw = ops.status();
+      if (raw === lastRaw && lastStatus) return lastStatus;
+      const status = JSON.parse(raw) as unknown;
       if (!validLocalStatus(status)) throw new Error("Host returned a malformed status");
+      lastRaw = raw;
+      lastStatus = status;
       return status;
     },
     artwork(id) {

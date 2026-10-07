@@ -4,7 +4,7 @@ import { POCKET_CAPABILITIES } from "../contracts/spec/platforms.ts";
 import { localMedia } from "../framework/src/localmedia.ts";
 import { resolve3dsBuildPlan } from "../tools/3ds-profile.ts";
 
-const STATUS: LocalStatus = { phase: "playing", trackId: 1, openSerial: 4, positionMs: 10, durationMs: 100, scanning: false, scanGeneration: 1, underruns: 0, error: "", decodeLoad: 12, artHandles: 1 };
+const STATUS: LocalStatus = { phase: "playing", trackId: 1, openSerial: 4, positionMs: 10, durationMs: 100, scanning: false, scanGeneration: 1, scanMs: 900, underruns: 0, error: "", decodeLoad: 12, artHandles: 1 };
 
 function recorder(over: Partial<LocalMediaOps> = {}) {
   const calls: string[] = [];
@@ -70,6 +70,8 @@ test("status and tracks are parsed and validated", () => {
   expect(validLocalStatus({ ...STATUS, openSerial: -1 })).toBe(false);
   expect(validLocalStatus({ ...STATUS, decodeLoad: undefined })).toBe(false);
   expect(validLocalStatus({ ...STATUS, artHandles: -1 })).toBe(false);
+  expect(validLocalStatus({ ...STATUS, scanMs: undefined })).toBe(false);
+  expect(validLocalStatus({ ...STATUS, scanMs: -1 })).toBe(false);
   expect(LOCALMEDIA).toEqual({ version: 2, root: "sdmc:/music/", maxTracks: 2048, artMax: 128 });
 });
 
@@ -82,6 +84,20 @@ const probeManifest = (requires: string[]) => ({
     viewport: { fixed: { logical: [400, 240], presentation: "native" } },
     surfaces: { auxiliary: { fixed: { logical: [320, 240], presentation: "native" } } },
   },
+});
+
+test("status() returns the same object while the host's reply is unchanged", () => {
+  let reply = JSON.stringify(STATUS);
+  const media = localMedia(recorder({ status: () => reply }).ops);
+  const first = media.status();
+  expect(media.status()).toBe(first);
+  reply = JSON.stringify({ ...STATUS, positionMs: 20 });
+  const second = media.status();
+  expect(second).not.toBe(first);
+  expect(second.positionMs).toBe(20);
+  expect(media.status()).toBe(second);
+  reply = "{"; // a bad reply is never served from the last good one
+  expect(() => media.status()).toThrow();
 });
 
 test("the 3DS profile ships media.local", () => {
