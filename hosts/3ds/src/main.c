@@ -323,9 +323,36 @@ static bool capture_write_surface(
   return fclose(file) == 0 && written == bytes;
 }
 
+/* The last TRACE_FRAMES frames' js / tick / draw microseconds, oldest first in stats.json. */
+enum { TRACE_FRAMES = 240 };
+static uint32_t trace[TRACE_FRAMES][3];
+static uint32_t trace_count;
+
+static void trace_frame(uint32_t js_us, uint32_t tick_us, uint32_t draw_us) {
+  uint32_t *slot = trace[trace_count % TRACE_FRAMES];
+  slot[0] = js_us;
+  slot[1] = tick_us;
+  slot[2] = draw_us;
+  trace_count += 1;
+}
+
 /* The sentinel the driver waits for. Written only after every requested frame
- * has been written AND closed, so a partial file can never be compared. */
+ * has been written AND closed, so a partial file can never be compared. First,
+ * stats.json: frame timing (the host's last 60-frame window and the trace),
+ * which scripts measure a run by. */
 static void capture_done(void) {
+  FILE *stats = fopen(CAPTURE_DIR "/stats.json", "wb");
+  if (stats != NULL) {
+    fprintf(stats, "{\"host\":%s,\"trace\":[", devserver_debug_stats());
+    uint32_t frames = trace_count < TRACE_FRAMES ? trace_count : TRACE_FRAMES;
+    for (uint32_t i = 0; i < frames; i += 1) {
+      const uint32_t *slot = trace[(trace_count - frames + i) % TRACE_FRAMES];
+      fprintf(stats, "%s[%lu,%lu,%lu]", i ? "," : "", (unsigned long)slot[0], (unsigned long)slot[1], (unsigned long)slot[2]);
+    }
+    fputs("]", stats);
+    fputs("}\n", stats);
+    fclose(stats);
+  }
   FILE *file = fopen(CAPTURE_DIR "/done", "wb");
   if (file == NULL) return;
   fputs("ok\n", file);
@@ -333,6 +360,14 @@ static void capture_done(void) {
 }
 
 #endif /* POCKETJS_CAPTURE */
+
+#if !defined(POCKETJS_OFFLOAD)
+/* System ticks to microseconds, saturated to 32 bits. */
+static uint32_t ticks_to_us(u64 ticks) {
+  u64 us = ticks * 1000000 / SYSCLOCK_ARM11;
+  return us > UINT32_MAX ? UINT32_MAX : (uint32_t)us;
+}
+#endif
 
 #if !defined(POCKETJS_CAPTURE) && !defined(POCKETJS_OFFLOAD)
 /* A transfer that replaced this .3dsx waits in native-deferred.3dsx until the
@@ -593,13 +628,6 @@ static void accept_guest(
   devserver_report_install("accepted", accepted_hash, "first PICA command list retired");
 }
 
-#if !defined(POCKETJS_CAPTURE) && !defined(POCKETJS_OFFLOAD)
-/* System ticks to microseconds, saturated to 32 bits. */
-static uint32_t ticks_to_us(u64 ticks) {
-  u64 us = ticks * 1000000 / SYSCLOCK_ARM11;
-  return us > UINT32_MAX ? UINT32_MAX : (uint32_t)us;
-}
-#endif
 
 static void begin_frame_wait(uint32_t run_frame) {
 #ifdef POCKETJS_CAPTURE
@@ -1024,15 +1052,25 @@ int main(void) {
     gfx_draw_surface(1);
     C3D_FrameEnd(0);
     offload_measure((unsigned)((offload_ui_ticks + svcGetSystemTick() - offload_cpu_start) * 1000000 / SYSCLOCK_ARM11));
-#if !defined(POCKETJS_CAPTURE) && !defined(POCKETJS_OFFLOAD)
+#if !defined(POCKETJS_OFFLOAD)
     {
-      /* A frame interval is measured only between consecutive presented
+      /* Capture builds time frames too (stats.json, written at the end of the
+       * window); timing only reads the tick counter, so frames are unchanged.
+       * A frame interval is measured only between consecutive presented
        * frames: a recovery or a reload advances run_frame by more than one,
        * and the frame after it starts a fresh interval. */
+#ifdef POCKETJS_CAPTURE
+      uint32_t timed_frame = frame;
+#else
+      uint32_t timed_frame = run_frame;
+#endif
       static u64 previous_js;
       static uint32_t previous_frame = UINT32_MAX;
       u64 phase_end = svcGetSystemTick();
-      if (previous_frame != UINT32_MAX && run_frame == previous_frame + 1) {
+      if (previous_frame != UINT32_MAX && timed_frame == previous_frame + 1) {
+#ifdef POCKETJS_CAPTURE
+        trace_frame(ticks_to_us(phase_tick - phase_js), ticks_to_us(phase_draw - phase_tick), ticks_to_us(phase_draw_end - phase_draw));
+#endif
         devserver_set_frame_timing(
           ticks_to_us(phase_tick - phase_js),
           ticks_to_us(phase_draw - phase_tick),
@@ -1042,8 +1080,10 @@ int main(void) {
         );
       }
       previous_js = phase_js;
-      previous_frame = run_frame;
+      previous_frame = timed_frame;
     }
+#endif
+#if !defined(POCKETJS_CAPTURE) && !defined(POCKETJS_OFFLOAD)
     guest.submitted_frames += 1;
     devserver_set_frame_stats(
       run_frame,

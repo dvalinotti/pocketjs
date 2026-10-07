@@ -109,8 +109,10 @@ static uint32_t frame_dropped_vertices;
 static char stats_json[1024];
 
 /* Frame phase timing: the last complete 60-frame window's means and maxima,
- * plus a running count of frame intervals above 25 ms (1.5 vblanks at 60 Hz). */
-enum { TIMING_PHASES = 5, TIMING_WINDOW = 60 };
+ * plus a running count of frame intervals above 25 ms (1.5 vblanks at 60 Hz).
+ * The sixth series is each frame's CPU work (js + tick + draw), so its maximum
+ * is a real frame's, not a sum of maxima from different frames. */
+enum { TIMING_PHASES = 6, TIMING_WINDOW = 60 };
 static uint32_t timing_sum[TIMING_PHASES];
 static uint32_t timing_max[TIMING_PHASES];
 static uint32_t timing_count;
@@ -490,7 +492,7 @@ void devserver_set_frame_timing(
   uint32_t gpu_us,
   uint32_t frame_us
 ) {
-  const uint32_t values[TIMING_PHASES] = { js_us, tick_us, draw_us, gpu_us, frame_us };
+  const uint32_t values[TIMING_PHASES] = { js_us, tick_us, draw_us, gpu_us, frame_us, js_us + tick_us + draw_us };
   for (int i = 0; i < TIMING_PHASES; i += 1) {
     timing_sum[i] += values[i];
     if (values[i] > timing_max[i]) timing_max[i] = values[i];
@@ -532,7 +534,7 @@ const char *devserver_debug_stats(void) {
     "\"connects\":%lu,\"authFailures\":%lu,\"timeouts\":%lu,"
     "\"discoveries\":%lu,\"uploads\":%lu,\"screenshots\":%lu},"
     "\"timingUs\":{\"js\":[%lu,%lu],\"tick\":[%lu,%lu],\"draw\":[%lu,%lu],"
-    "\"gpu\":[%lu,%lu],\"frame\":[%lu,%lu],\"slowFrames\":%lu}}",
+    "\"gpu\":[%lu,%lu],\"frame\":[%lu,%lu],\"work\":[%lu,%lu],\"slowFrames\":%lu}}",
     POCKETJS_TARGET_ID,
     (unsigned)POCKETJS_HOST_ABI,
     (unsigned long long)running_hash,
@@ -556,6 +558,7 @@ const char *devserver_debug_stats(void) {
     (unsigned long)timing_mean_out[2], (unsigned long)timing_max_out[2],
     (unsigned long)timing_mean_out[3], (unsigned long)timing_max_out[3],
     (unsigned long)timing_mean_out[4], (unsigned long)timing_max_out[4],
+    (unsigned long)timing_mean_out[5], (unsigned long)timing_max_out[5],
     (unsigned long)timing_slow_frames
   );
   return stats_json;

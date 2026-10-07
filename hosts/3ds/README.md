@@ -225,9 +225,12 @@ captures both screens, and `o` opens the panel.
 **`devStats` carries `timingUs`: the mean and maximum microseconds of each
 frame phase over the last complete 60-frame window** — guest JS, core tick
 (animation and physics), the two DrawList builds, PICA200 preparation and
-submission, and the frame interval — plus `slowFrames`, the count of intervals
-above 25 ms since boot. A frame after a recovery or a package reload starts a
-new interval and is not sampled.
+submission, and the frame interval — plus `work`, each frame's JS + tick + draw
+(its maximum is one real frame's CPU time, where the per-phase maxima may come
+from different frames), and `slowFrames`, the count of intervals above 25 ms
+since boot. A frame after a recovery or a package reload starts a new interval
+and is not sampled. Capture builds keep the timing too; their `C3D_FRAME_SYNCDRAW`
+pacing stretches the frame interval, so judge them by `work`.
 
 **One authenticated, ordered TCP connection carries every development
 message.** JSON frames contain only Pocket DevTools control and logs. Package
@@ -478,9 +481,11 @@ back off the render target, and the process **parks instead of exiting** —
 Azahar does not stop when the app returns from `main()`.
 
 Emitted under `sdmc:/pocketjs-captures/`: `fNNNN.raw` named by the
-process-global frame counter (exactly `400*240*4` bytes), then `done` written
-only after the last frame is closed, and `error.txt` on the failure path so the
-driver reports the message instead of a timeout.
+process-global frame counter (exactly `400*240*4` bytes), then `stats.json`, then
+`done` written only after the last frame is closed, and `error.txt` on the
+failure path so the driver reports the message instead of a timeout.
+`stats.json` is `{"host": <devStats>, "trace": [[js, tick, draw], …]}`: the
+`devStats` JSON and the last 240 frames' phase times in µs.
 
 The readback is **not** `gfxGetFramebuffer` after `C3D_FrameEnd` — that buffer
 has already been swapped and reads back black. It is an explicit
