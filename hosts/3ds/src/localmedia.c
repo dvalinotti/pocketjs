@@ -106,6 +106,7 @@ static _Atomic bool art_done_ok;
 /* The last completed scan: walk time, tracks, files read; cached-list time (-1 without a cache). */
 static _Atomic unsigned scan_ms, scan_files, scan_parsed;
 static _Atomic int cached_ms = -1;
+static bool launch_scanned; /* library thread: the cache serves only the first scan */
 static uint8_t *art_pixels;               /* written by the worker before art_done_generation */
 
 /* ---- UI-thread state ----------------------------------------------------------- */
@@ -335,13 +336,16 @@ static void make_cache_dir(void) {
   mkdir(LOCALMEDIA_CACHE_DIR, 0777);
 }
 
-/* A scan: the cached list first (when there is a cache), then the confirmed one. */
+/* A scan: the cached list first (a launch's first scan, when the cache lists any track), then
+ * the confirmed one. Later scans (a manual rescan) read every file, so a re-tag that keeps the
+ * file's size shows up. */
 static void scan(unsigned *handled_art) {
   uint64_t started = svcGetSystemTick();
   LmCache previous;
-  bool have_cache = lm_cache_read(CACHE_PATH, &previous);
+  bool have_cache = !launch_scanned && lm_cache_read(CACHE_PATH, &previous);
+  launch_scanned = true;
   atomic_store(&cached_ms, -1);
-  if (have_cache) {
+  if (have_cache && previous.count > 0) {
     LmLibrary *cached = lm_library_from_cache(&previous, ids, MAX_TRACKS);
     if (cached) {
       publish_library(cached);
@@ -422,6 +426,7 @@ static unsigned visible_phase(unsigned base) {
 }
 
 bool localmedia_start(void) {
+  launch_scanned = false;
   ids = lm_ids_create();
   library = lm_library_empty();
   art_pixels = malloc(LM_ART_PIXELS_BYTES);

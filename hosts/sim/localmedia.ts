@@ -29,8 +29,8 @@ export interface SimLocalMediaOptions {
   /** Virtual time an artwork decode takes; the handle is ready on the first advance() at least
    * this long after the request. 0 (default): ready at the next advance(). */
   artworkMs?: number;
-  /** A scan cache left by an earlier session: the first scan publishes it before the folder's list.
-   * Later scans publish the previous scan's list first, as the native host does. */
+  /** A scan cache left by an earlier session: the first scan publishes it (when it lists any
+   * track) before the folder's list. Later scans read the folder only, as the native host does. */
   cached?: readonly SimLocalTrack[];
 }
 
@@ -74,7 +74,7 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
     phase: "idle", trackId: -1, openSerial: 0, positionMs: 0, durationMs: 0,
     scanning: false, scanGeneration: 0, scanMs: 0, underruns: 0, error: "", decodeLoad: 0, artHandles: 0,
   };
-  /** What the scan cache holds: published first by the next scan. */
+  /** The scan cache: published first by the first scan, then spent. */
   let cache: readonly SimLocalTrack[] | null = options.cached ?? null;
 
   const publish = (list: readonly SimLocalTrack[]) => {
@@ -101,7 +101,6 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
   };
   const finishScan = () => {
     publish(library);
-    cache = library;
     scanLeft = -1;
     status.scanning = false;
     status.scanMs = Math.max(0, options.scanMs ?? 0);
@@ -116,7 +115,8 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
       log.push("scan()");
       if (status.scanning) return false;
       status.scanning = true;
-      if (cache) publish(cache);
+      if (cache?.length) publish(cache);
+      cache = null;
       const scanMs = options.scanMs ?? 0;
       if (scanMs <= 0) finishScan();
       else scanLeft = scanMs;

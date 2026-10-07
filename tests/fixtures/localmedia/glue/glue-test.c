@@ -4,11 +4,13 @@
  * art.mp3 (tagged-v23), junk.mp3 (no frames), short.mp3 (the first 11 frames of cbr-plain),
  * a copy of a.mp3 under a 250-byte UTF-8 name and 300 pad-NNN.mp3 copies of cbr-plain. */
 #include "localmedia.h"
+#include "localmedia_cache.h"
 #include "glue-fake.h"
 #include "../check.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <time.h>
 
 /* alloc-fail.c: the scan's allocations of at least this many bytes fail (0: none). */
@@ -40,12 +42,28 @@ static int id_of(const char *file) {
 }
 
 int main(void) {
+  /* An empty cache (an earlier launch found no music) publishes nothing: the first scan stays in
+   * progress until the folder's list, which is the first generation. */
+  mkdir(LOCALMEDIA_CACHE_DIR, 0777);
+  LmCache empty = {0};
+  CHECK(lm_cache_write(LOCALMEDIA_CACHE_DIR "/library.cache", &empty));
   CHECK(localmedia_start());
   CHECK(localmedia_scan());
-  WAIT_UNTIL(field(read_status(), "scanGeneration") == 1, 3000);
+  WAIT_UNTIL(strstr(read_status(), "\"scanning\":false") != NULL, 5000);
   CHECK_INT(field(read_status(), "scanGeneration"), 1);
   int a = id_of("a.mp3"), b = id_of("b.mp3"), art = id_of("art.mp3"), junk = id_of("junk.mp3");
   CHECK(a >= 0 && b >= 0 && art >= 0 && junk >= 0);
+
+  /* A rescan reads every file again (a re-tag that keeps the size shows up); the cache serves
+   * only a launch's first scan. Ids stay with their files. */
+  CHECK(localmedia_scan());
+  WAIT_UNTIL(field(read_status(), "scanGeneration") == 2 && strstr(status, "\"scanning\":false"), 5000);
+  CHECK_INT(field(read_status(), "scanGeneration"), 2);
+  char stats[256];
+  localmedia_stats_json(stats, sizeof stats);
+  CHECK(field(stats, "files") > 300);
+  CHECK_INT(field(stats, "parsed"), field(stats, "files"));
+  CHECK_INT(id_of("a.mp3"), a);
 
   /* Snapshot rule: an open reads back loading with its serial at once, then plays. */
   CHECK_INT(localmedia_open(a), 1);

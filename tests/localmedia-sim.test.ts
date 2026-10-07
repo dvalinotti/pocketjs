@@ -138,7 +138,7 @@ test("ids stay with their files across a rescan; new files get fresh ids; a vani
   expect(media.tracks().map((t) => [t.id, t.file])).toEqual([[0, "01 Intro.mp3"], [1, "untagged.mp3"], [2, "broken.mp3"]]);
   host.setLibrary([{ file: "00 New.mp3", durationMs: 500 }, LIB[1]!, LIB[0]!]);
   media.scan();
-  expect(media.status().scanGeneration).toBe(3); // the previous list (cache), then the folder's
+  expect(media.status().scanGeneration).toBe(2); // a rescan reads the folder: the cache serves only the first scan
   expect(media.tracks().map((t) => [t.id, t.file])).toEqual([[3, "00 New.mp3"], [1, "untagged.mp3"], [0, "01 Intro.mp3"]]);
   expect(media.open(2)).toBe(0);
   expect(media.open(3)).toBeGreaterThan(0);
@@ -158,4 +158,14 @@ test("a scan publishes the cached list first, keeps scanning, then publishes the
   expect(media.status()).toMatchObject({ scanning: false, scanGeneration: 2, scanMs: 500 });
   expect(media.tracks().map((t) => t.file)).toEqual(["01 Intro.mp3", "untagged.mp3"]);
   expect(media.tracks().find((t) => t.file === "untagged.mp3")!.id).toBe(0); // ids follow files across both lists
+});
+
+test("an empty cache publishes nothing: the first scan stays in progress until the folder's list", () => {
+  const host = createSimLocalMedia([LIB[0]!], { scanMs: 500, cached: [] });
+  const media = localMedia(host.ns);
+  media.scan();
+  expect(media.status()).toMatchObject({ scanning: true, scanGeneration: 0 });
+  host.advance(500);
+  expect(media.status()).toMatchObject({ scanning: false, scanGeneration: 1 });
+  expect(media.tracks().map((t) => t.file)).toEqual(["01 Intro.mp3"]);
 });
