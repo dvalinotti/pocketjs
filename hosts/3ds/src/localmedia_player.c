@@ -196,8 +196,9 @@ uint32_t lm_player_position(LmPlayer *p) {
   if (slot >= 0) {
     uint32_t ms = frames_ms(p, p->slot_start[slot] + played);
     if (ms > p->position_ms) p->position_ms = ms;
-  } else if (p->queued_once) {
-    /* Nothing is playing: everything decoded so far has been heard. */
+  } else if (p->queued_once && lm_player_queued(p) == 0) {
+    /* Nothing is playing or waiting: everything decoded so far has been heard. (Slots
+     * queued before the DSP starts the first have not been.) */
     uint32_t ms = decoded_ms(p);
     if (ms > p->position_ms) p->position_ms = ms;
   }

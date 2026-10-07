@@ -3,7 +3,8 @@
 
 #include <stdlib.h>
 
-/* A fake sink: queued slots play in FIFO order as the test advances time. */
+/* A fake sink: queued slots play in FIFO order as the test advances time. While `stalled`,
+ * queued slots wait without playing (the DSP has not picked up the first yet). */
 typedef struct {
   int16_t data[LM_SLOTS][LM_SLOT_FRAMES * 2];
   int frames[LM_SLOTS];
@@ -12,6 +13,7 @@ typedef struct {
   int rate, channels, clears;
   uint64_t played_total; /* frames played since the last clear */
   uint64_t tick;
+  int stalled;
 } Fake;
 
 static int fake_free(void *ctx, int slot) {
@@ -30,7 +32,7 @@ static void fake_configure(void *ctx, int rate, int channels) { Fake *f = ctx; f
 static void fake_clear(void *ctx) { Fake *f = ctx; f->count = 0; f->played = 0; f->played_total = 0; f->clears++; }
 static int fake_playing(void *ctx, uint32_t *played) {
   Fake *f = ctx;
-  if (f->count == 0) return -1;
+  if (f->count == 0 || f->stalled) return -1;
   *played = f->played;
   return f->fifo[f->head];
 }
@@ -147,6 +149,18 @@ int main(void) {
   advance(&fake, LM_SLOT_FRAMES);
   lm_player_pump(&player, 1);
   CHECK_INT(player.underruns, 2);
+  lm_player_close(&player);
+
+  /* Queued but not yet playing: nothing has been heard, so the position stays put. */
+  memset(&fake, 0, sizeof fake);
+  fake.stalled = 1;
+  CHECK(lm_player_open(&player, &sink, "cbr-info.mp3"));
+  CHECK_INT(lm_player_pump(&player, 4), LM_PUMP_PLAYING);
+  CHECK_INT(lm_player_position(&player), 0);
+  fake.stalled = 0;
+  CHECK_INT(lm_player_position(&player), 0);
+  advance(&fake, 4410);
+  CHECK_INT(lm_player_position(&player), 100);
   lm_player_close(&player);
 
   /* Failures: a missing file, no frames, and frames followed by unreadable bytes. */
