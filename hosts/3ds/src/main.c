@@ -338,8 +338,8 @@ static void trace_frame(uint32_t js_us, uint32_t tick_us, uint32_t draw_us) {
 
 /* The sentinel the driver waits for. Written only after every requested frame
  * has been written AND closed, so a partial file can never be compared. First,
- * stats.json: frame timing (the host's last 60-frame window and the trace),
- * which scripts measure a run by. */
+ * stats.json: frame timing (the host's last 60-frame window and the trace) and,
+ * with media.local, the last scan's timings, which scripts measure a run by. */
 static void capture_done(void) {
   FILE *stats = fopen(CAPTURE_DIR "/stats.json", "wb");
   if (stats != NULL) {
@@ -350,6 +350,11 @@ static void capture_done(void) {
       fprintf(stats, "%s[%lu,%lu,%lu]", i ? "," : "", (unsigned long)slot[0], (unsigned long)slot[1], (unsigned long)slot[2]);
     }
     fputs("]", stats);
+#ifdef POCKETJS_LOCALMEDIA
+    char localmedia[256];
+    localmedia_stats_json(localmedia, sizeof localmedia);
+    fprintf(stats, ",\"localmedia\":%s", localmedia);
+#endif
     fputs("}\n", stats);
     fclose(stats);
   }

@@ -6,6 +6,7 @@
  * Commands and results cross threads through atomics only (as media.c). */
 #include "localmedia.h"
 #include "localmedia_art.h"
+#include "localmedia_cache.h"
 #include "localmedia_ids.h"
 #include "localmedia_library.h"
 #include "localmedia_player.h"
@@ -16,11 +17,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #ifndef LOCALMEDIA_ROOT
 #define LOCALMEDIA_ROOT "sdmc:/music/"
 #endif
 #define ROOT LOCALMEDIA_ROOT
+/* The scan cache (localmedia_cache.h) and its folder. */
+#ifndef LOCALMEDIA_CACHE_DIR
+#define LOCALMEDIA_CACHE_DIR "sdmc:/pocketjs/localmedia"
+#endif
+#define CACHE_PATH LOCALMEDIA_CACHE_DIR "/library.cache"
 #define MAX_TRACKS 2048
 #define CHANNEL 0
 #define PREFILL_SLOTS 4
@@ -94,6 +101,9 @@ static _Atomic int scan_stop;
 static LmLibrary *_Atomic pending_library;
 static _Atomic unsigned art_done_generation; /* request generation the result belongs to */
 static _Atomic bool art_done_ok;
+/* The last completed scan: walk time, tracks, files read; cached-list time (-1 without a cache). */
+static _Atomic unsigned scan_ms, scan_files, scan_parsed;
+static _Atomic int cached_ms = -1;
 static uint8_t *art_pixels;               /* written by the worker before art_done_generation */
 
 /* ---- UI-thread state ----------------------------------------------------------- */
@@ -265,33 +275,99 @@ static void audio_main(void *unused) {
 }
 
 /* ---- library worker ------------------------------------------------------------ */
+/* Decodes the newest art request, if it is new. Runs between scanned files too, so a cover
+ * never waits for a whole scan. */
+static void serve_art(void *context) {
+  unsigned *handled = context;
+  Mail request;
+  mail_read(&art_mail, &request);
+  if (request.generation == 0 || request.generation == *handled) return;
+  *handled = request.generation;
+  bool ok = false;
+  FILE *file = fopen(request.path, "rb");
+  if (file) {
+    uint8_t *data;
+    size_t length = lm_art_read(file, request.offset, request.raw_bytes, request.unsync, &data);
+    fclose(file);
+    ok = length > 0 && lm_art_decode(data, length, art_pixels);
+    free(data);
+  }
+  atomic_store(&art_done_ok, ok);
+  atomic_store_explicit(&art_done_generation, request.generation, memory_order_release);
+}
+
+static unsigned ms_since(uint64_t started) {
+  return (unsigned)((svcGetSystemTick() - started) * 1000 / SYSCLOCK_ARM11);
+}
+
+/* Publishes a library for the UI thread to adopt; a newer one replaces one not yet adopted. */
+static void publish_library(LmLibrary *scanned) {
+  lm_library_free(atomic_exchange(&pending_library, scanned));
+}
+
+/* A second file reader for a scan, at the library thread's priority. */
+static void *start_reader(void (*work)(void *), void *arg) {
+  s32 priority = 0x3f;
+  svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+  return threadCreate(work, arg, 32 * 1024, priority, -2, false);
+}
+
+static void join_reader(void *thread) {
+  threadJoin(thread, U64_MAX);
+  threadFree(thread);
+}
+
+/* Makes the cache's folder and its parent; mkdir() of one that exists fails harmlessly. */
+static void make_cache_dir(void) {
+  char parent[] = LOCALMEDIA_CACHE_DIR;
+  char *slash = strrchr(parent, '/');
+  if (slash) {
+    *slash = '\0';
+    mkdir(parent, 0777);
+  }
+  mkdir(LOCALMEDIA_CACHE_DIR, 0777);
+}
+
+/* A scan: the cached list first (when there is a cache), then the confirmed one. */
+static void scan(unsigned *handled_art) {
+  uint64_t started = svcGetSystemTick();
+  LmCache previous;
+  bool have_cache = lm_cache_read(CACHE_PATH, &previous);
+  atomic_store(&cached_ms, -1);
+  if (have_cache) {
+    LmLibrary *cached = lm_library_from_cache(&previous, ids, MAX_TRACKS);
+    if (cached) {
+      publish_library(cached);
+      atomic_store(&cached_ms, (int)ms_since(started));
+    }
+  }
+  uint64_t walk = svcGetSystemTick();
+  LmCache next = {0};
+  LmScanStats stats;
+  LmScanOptions options = {have_cache ? &previous : NULL, &next, &stats, serve_art, handled_art, start_reader, join_reader};
+  LmLibrary *scanned = lm_library_scan_with(ROOT, ids, MAX_TRACKS, &scan_stop, &options);
+  if (scanned) {
+    atomic_store(&scan_ms, ms_since(walk));
+    atomic_store(&scan_files, (unsigned)stats.files);
+    atomic_store(&scan_parsed, (unsigned)stats.parsed);
+    publish_library(scanned);
+    make_cache_dir();
+    lm_cache_write(CACHE_PATH, &next);
+  } else {
+    /* Out of memory or stopped: the current list stays. */
+    atomic_store(&scanning, false);
+  }
+  lm_cache_free(&next);
+  if (have_cache) lm_cache_free(&previous);
+}
+
 static void library_main(void *unused) {
   (void)unused;
   unsigned handled_art = 0;
   while (atomic_load(&running)) {
     LightEvent_WaitTimeout(&library_wake, 50000000LL);
-    if (atomic_exchange(&scan_requested, false)) {
-      LmLibrary *scanned = lm_library_scan(ROOT, ids, MAX_TRACKS, &scan_stop);
-      if (!scanned && !atomic_load(&scan_stop)) scanned = lm_library_empty();
-      LmLibrary *old = atomic_exchange(&pending_library, scanned);
-      lm_library_free(old);
-      if (!scanned) atomic_store(&scanning, false);
-    }
-    Mail request;
-    mail_read(&art_mail, &request);
-    if (request.generation == 0 || request.generation == handled_art) continue;
-    handled_art = request.generation;
-    bool ok = false;
-    FILE *file = fopen(request.path, "rb");
-    if (file) {
-      uint8_t *data;
-      size_t length = lm_art_read(file, request.offset, request.raw_bytes, request.unsync, &data);
-      fclose(file);
-      ok = length > 0 && lm_art_decode(data, length, art_pixels);
-      free(data);
-    }
-    atomic_store(&art_done_ok, ok);
-    atomic_store_explicit(&art_done_generation, request.generation, memory_order_release);
+    if (atomic_exchange(&scan_requested, false)) scan(&handled_art);
+    serve_art(&handled_art);
   }
 }
 
@@ -302,7 +378,8 @@ static void adopt_scan(void) {
   lm_library_free(library);
   library = scanned;
   scan_generation++;
-  atomic_store(&scanning, false);
+  /* A list from the cache is shown while the folder is checked; scanning ends with the next. */
+  if (!scanned->provisional) atomic_store(&scanning, false);
 }
 
 /* Posts an open (path, "" to stop) or a seek as the newest playback command. */
@@ -465,9 +542,9 @@ void localmedia_status(char *out, size_t capacity) {
   if (command_track < 0) position = duration = error = 0;
   snprintf(out, capacity,
     "{\"phase\":\"%s\",\"trackId\":%ld,\"openSerial\":%u,\"positionMs\":%u,\"durationMs\":%u,\"scanning\":%s,"
-    "\"scanGeneration\":%u,\"underruns\":%u,\"error\":\"%s\",\"decodeLoad\":%u,\"artHandles\":%d}",
+    "\"scanGeneration\":%u,\"scanMs\":%u,\"underruns\":%u,\"error\":\"%s\",\"decodeLoad\":%u,\"artHandles\":%d}",
     PHASES[phase], (long)command_track, open_serial, position, duration, atomic_load(&scanning) ? "true" : "false",
-    scan_generation, atomic_load(&underruns), phase == FAILED ? ERRORS[error] : "", atomic_load(&decode_load),
+    scan_generation, atomic_load(&scan_ms), atomic_load(&underruns), phase == FAILED ? ERRORS[error] : "", atomic_load(&decode_load),
     art_handle_count);
 }
 
@@ -515,4 +592,9 @@ void localmedia_release_artwork(int32_t handle) {
     art_handles[i] = art_handles[--art_handle_count];
     return;
   }
+}
+
+void localmedia_stats_json(char *out, size_t capacity) {
+  snprintf(out, capacity, "{\"cachedMs\":%d,\"scanMs\":%u,\"files\":%u,\"parsed\":%u}",
+    atomic_load(&cached_ms), atomic_load(&scan_ms), atomic_load(&scan_files), atomic_load(&scan_parsed));
 }

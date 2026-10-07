@@ -1,13 +1,17 @@
 /* The media.local glue (hosts/3ds/src/localmedia.c) on the host: real threads,
  * mail slots and status, the fake NDSP and core textures of glue-fake.c, and a
  * music folder (LOCALMEDIA_ROOT) holding a.mp3 (cbr-info), b.mp3 (cbr-plain),
- * art.mp3 (tagged-v23) and junk.mp3 (no frames). */
+ * art.mp3 (tagged-v23), junk.mp3 (no frames) and 300 pad-NNN.mp3 copies of cbr-plain. */
 #include "localmedia.h"
 #include "glue-fake.h"
 #include "../check.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <time.h>
+
+/* alloc-fail.c: the scan's allocations of at least this many bytes fail (0: none). */
+extern _Atomic size_t lm_test_alloc_fail_bytes;
 
 static char status[512];
 static const char *read_status(void) { localmedia_status(status, sizeof status); return status; }
@@ -98,6 +102,42 @@ int main(void) {
   localmedia_release_artwork(handle);
   CHECK_INT(field(read_status(), "artHandles"), 0);
 
+  /* Art is served between scanned files: a cover asked for during a full rescan arrives before
+   * the rescan ends. */
+  remove(LOCALMEDIA_CACHE_DIR "/library.cache");
+  long generation = field(read_status(), "scanGeneration");
+  CHECK(localmedia_scan());
+  int32_t during = localmedia_artwork(art);
+  bool scanning_then = false;
+  for (int i = 0; i < 3000 && during < 0; i++) {
+    sleep_ms(1);
+    during = localmedia_artwork(art);
+    if (during > 0) scanning_then = strstr(read_status(), "\"scanning\":true") != NULL;
+  }
+  CHECK(during > 0);
+  CHECK(scanning_then);
+  localmedia_release_artwork(during);
+  WAIT_UNTIL(field(read_status(), "scanGeneration") > generation, 5000);
+  CHECK(field(status, "scanGeneration") > generation);
+
+  /* Out of memory during a rescan (its big allocations fail, small ones still succeed): the
+   * list stays, not an empty one, and scanning ends. */
+  size_t length;
+  char *before = strdup(localmedia_tracks(&length));
+  generation = field(read_status(), "scanGeneration");
+  atomic_store(&lm_test_alloc_fail_bytes, 64);
+  CHECK(localmedia_scan());
+  WAIT_UNTIL(strstr(read_status(), "\"scanning\":false") != NULL, 3000);
+  atomic_store(&lm_test_alloc_fail_bytes, 0);
+  CHECK(strstr(status, "\"scanning\":false") != NULL);
+  CHECK_INT(field(status, "scanGeneration"), generation);
+  CHECK_STR(localmedia_tracks(&length), before);
+  free(before);
+
+  /* Stopping in the middle of a full rescan joins both readers and frees everything. */
+  remove(LOCALMEDIA_CACHE_DIR "/library.cache");
+  CHECK(localmedia_scan());
+  sleep_ms(5);
   localmedia_stop();
   CHECK_INT(fake_live_textures(), 0);
   CHECK_DONE("localmedia glue");

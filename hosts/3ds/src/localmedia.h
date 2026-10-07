@@ -20,4 +20,6 @@ void localmedia_volume(double volume);
 void localmedia_status(char *out, size_t capacity);
 int32_t localmedia_artwork(int32_t id);
 void localmedia_release_artwork(int32_t handle);
+/* {"cachedMs":…,"scanMs":…,"files":…,"parsed":…} for the last completed scan. */
+void localmedia_stats_json(char *out, size_t capacity);
 #endif

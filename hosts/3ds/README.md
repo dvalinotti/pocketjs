@@ -484,8 +484,10 @@ Emitted under `sdmc:/pocketjs-captures/`: `fNNNN.raw` named by the
 process-global frame counter (exactly `400*240*4` bytes), then `stats.json`, then
 `done` written only after the last frame is closed, and `error.txt` on the
 failure path so the driver reports the message instead of a timeout.
-`stats.json` is `{"host": <devStats>, "trace": [[js, tick, draw], …]}`: the
-`devStats` JSON and the last 240 frames' phase times in µs.
+`stats.json` is `{"host": <devStats>, "trace": [[js, tick, draw], …],
+"localmedia": {"cachedMs", "scanMs", "files", "parsed"}}`: the `devStats` JSON,
+the last 240 frames' phase times in µs, and (with media.local) the last scan's
+cached-list and walk times and its track and read-file counts.
 
 The readback is **not** `gfxGetFramebuffer` after `C3D_FrameEnd` — that buffer
 has already been swapped and reads back black. It is an explicit
