@@ -1,13 +1,14 @@
 /* Folder scan and tracks() JSON; see localmedia_library.h. */
 #include "localmedia_library.h"
+#include "localmedia_dir.h"
 #include "localmedia_mp3.h"
 #include "localmedia_tags.h"
 
-#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
+
+#include "localmedia_alloc.h"
 
 typedef struct {
   char *bytes;
@@ -50,36 +51,74 @@ static void json_string(Json *j, const char *text) {
   json_raw(j, "\"", 1);
 }
 
-static int is_mp3(const char *name) {
-  size_t length = strlen(name);
-  if (length < 5) return 0;
-  const char *ext = name + length - 4;
-  return ext[0] == '.' && (ext[1] | 0x20) == 'm' && (ext[2] | 0x20) == 'p' && ext[3] == '3';
-}
-
 /* The file name without its extension, as UTF-8 text (shared rules with tag text). */
 static void stem_of(const char *name, char out[LM_FIELD_BYTES]) {
   size_t length = strlen(name) - 4;
   lm_tags_text(3, (const uint8_t *)name, length, out);
 }
 
-static void add_track_json(Json *j, int first, int id, const char *file, const LmTags *tags, uint32_t duration_ms, int track) {
+static void add_track_json(Json *j, int first, int id, const LmCacheEntry *e) {
   char number[64];
   char stem[LM_FIELD_BYTES];
   json_text(j, first ? "{\"id\":" : ",{\"id\":");
   snprintf(number, sizeof number, "%d", id);
   json_text(j, number);
   json_text(j, ",\"file\":");
-  json_string(j, file);
+  json_string(j, e->file);
   json_text(j, ",\"title\":");
-  if (tags->title[0]) json_string(j, tags->title);
-  else { stem_of(file, stem); json_string(j, stem); }
+  if (e->title[0]) json_string(j, e->title);
+  else { stem_of(e->file, stem); json_string(j, stem); }
   json_text(j, ",\"artist\":");
-  json_string(j, tags->artist[0] ? tags->artist : "Unknown Artist");
+  json_string(j, e->artist[0] ? e->artist : "Unknown Artist");
   json_text(j, ",\"album\":");
-  json_string(j, tags->album[0] ? tags->album : "Unknown Album");
-  snprintf(number, sizeof number, ",\"track\":%d,\"durationMs\":%u,\"hasArt\":%s}", track, (unsigned)duration_ms, tags->has_art ? "true" : "false");
+  json_string(j, e->album[0] ? e->album : "Unknown Album");
+  snprintf(number, sizeof number, ",\"track\":%u,\"durationMs\":%u,\"hasArt\":%s}", (unsigned)e->track, (unsigned)e->duration_ms, e->has_art ? "true" : "false");
   json_text(j, number);
+}
+
+/* Collects tracks and their JSON for one library. */
+typedef struct {
+  LmLibrary *library;
+  LmTrack *tracks;
+  int max;
+  Json j;
+  int ok;
+} Builder;
+
+static void builder_init(Builder *b, int max) {
+  memset(b, 0, sizeof *b);
+  b->library = calloc(1, sizeof *b->library);
+  b->tracks = calloc((size_t)(max > 0 ? max : 1), sizeof *b->tracks);
+  b->max = max;
+  b->ok = b->library && b->tracks;
+  json_text(&b->j, "[");
+}
+
+static int builder_add(Builder *b, LmIds *ids, const LmCacheEntry *e) {
+  if (!b->ok || b->library->count >= b->max) return 0;
+  size_t length = strlen(e->file) + 1;
+  char *file = malloc(length);
+  int id = file ? lm_ids_get(ids, e->file) : -1;
+  if (id < 0) { free(file); b->ok = 0; return 0; }
+  memcpy(file, e->file, length);
+  b->tracks[b->library->count] = (LmTrack){id, file, e->duration_ms, e->has_art, (long)e->art_offset, (long)e->art_raw_bytes, e->art_unsync};
+  add_track_json(&b->j, b->library->count == 0, id, e);
+  b->library->count++;
+  return 1;
+}
+
+static LmLibrary *builder_finish(Builder *b) {
+  json_text(&b->j, "]");
+  if (!b->ok || b->j.failed) {
+    if (b->library) { b->library->tracks = b->tracks; lm_library_free(b->library); }
+    else free(b->tracks);
+    free(b->j.bytes);
+    return NULL;
+  }
+  b->library->tracks = b->tracks;
+  b->library->json = b->j.bytes;
+  b->library->json_length = b->j.length;
+  return b->library;
 }
 
 LmLibrary *lm_library_empty(void) {
@@ -106,53 +145,133 @@ const LmTrack *lm_library_find(const LmLibrary *library, int id) {
   return NULL;
 }
 
+/* Reads one file's tags and duration into `out` (strings point into `tags`). */
+static int parse_file(const char *path, const char *file, uint64_t size, uint8_t *buffer, LmTags *tags, LmCacheEntry *out) {
+  FILE *f = fopen(path, "rb");
+  if (!f) return 0;
+  /* Every SD card read costs about 0.9 ms plus 0.2 ms per KB (Azahar), so the buffer is just
+   * big enough for a tag's text frames or the first audio frame: a file takes three or four. */
+  setvbuf(f, (char *)buffer, _IOFBF, LM_SCAN_BUFFER);
+  LmStream stream;
+  lm_tags_read(f, (long)size, tags);
+  uint32_t duration = lm_stream_probe(f, tags->audio_start, tags->audio_end, &stream) ? stream.duration_ms : 0;
+  fclose(f);
+  *out = (LmCacheEntry){(char *)file, size, tags->title, tags->artist, tags->album, (uint32_t)tags->track, duration,
+    (uint8_t)tags->has_art, tags->art_offset, tags->art_raw_bytes, (uint8_t)tags->art_unsync};
+  return 1;
+}
+
 LmLibrary *lm_library_scan(const char *root, LmIds *ids, int max_tracks, const atomic_int *stop) {
-  DIR *dir = opendir(root);
-  if (!dir) return lm_library_empty();
-  LmLibrary *library = calloc(1, sizeof *library);
-  LmTrack *tracks = calloc((size_t)max_tracks, sizeof *tracks);
-  Json j = {0};
-  json_text(&j, "[");
-  int ok = library && tracks;
-  size_t root_length = strlen(root);
-  struct dirent *entry;
-  while (ok && library->count < max_tracks && (entry = readdir(dir))) {
-    if (stop && atomic_load(stop)) { ok = 0; break; }
-    if (!is_mp3(entry->d_name)) continue;
-    size_t name_length = strlen(entry->d_name);
+  return lm_library_scan_with(root, ids, max_tracks, stop, NULL);
+}
+
+/* The files a scan must read, shared by its readers: each takes the next job until none are left. */
+typedef struct {
+  const char *root;
+  const LmDirList *list;
+  const int *jobs;          /* indices into list */
+  int job_count;
+  atomic_int next_job;
+  LmCacheEntry *parsed;     /* per listed file: its own copy, when read */
+  char *read;               /* per listed file: 1 when parsed[i] is filled */
+  const atomic_int *stop;
+  atomic_int failed;        /* out of memory */
+  const LmScanOptions *options;
+} Jobs;
+
+typedef struct {
+  Jobs *jobs;
+  int calls_between;        /* only the scanning thread calls options->between */
+} Reader;
+
+static void read_files(void *context) {
+  Reader *reader = context;
+  Jobs *jobs = reader->jobs;
+  size_t root_length = strlen(jobs->root);
+  uint8_t *buffer = malloc(LM_SCAN_BUFFER);
+  LmTags *tags = malloc(sizeof *tags);
+  if (!buffer || !tags) atomic_store(&jobs->failed, 1);
+  while (!atomic_load(&jobs->failed) && !(jobs->stop && atomic_load(jobs->stop))) {
+    int job = atomic_fetch_add(&jobs->next_job, 1);
+    if (job >= jobs->job_count) break;
+    if (reader->calls_between && jobs->options->between) jobs->options->between(jobs->options->ctx);
+    int index = jobs->jobs[job];
+    const LmDirEntry *file = &jobs->list->entries[index];
+    size_t name_length = strlen(file->name);
     char *path = malloc(root_length + name_length + 1);
-    char *file = malloc(name_length + 1);
-    if (!path || !file) { free(path); free(file); ok = 0; break; }
-    memcpy(path, root, root_length);
-    memcpy(path + root_length, entry->d_name, name_length + 1);
-    memcpy(file, entry->d_name, name_length + 1);
-    struct stat info;
-    FILE *f = NULL;
-    if (stat(path, &info) != 0 || !S_ISREG(info.st_mode) || !(f = fopen(path, "rb"))) { free(path); free(file); continue; }
+    if (!path) { atomic_store(&jobs->failed, 1); break; }
+    memcpy(path, jobs->root, root_length);
+    memcpy(path + root_length, file->name, name_length + 1);
+    LmCacheEntry view;
+    if (parse_file(path, file->name, file->size, buffer, tags, &view)) {
+      if (lm_cache_entry_copy(&jobs->parsed[index], &view)) jobs->read[index] = 1;
+      else atomic_store(&jobs->failed, 1);
+    }
     free(path);
-    LmTags tags;
-    LmStream stream;
-    long size = (long)info.st_size;
-    lm_tags_read(f, size, &tags);
-    uint32_t duration = lm_stream_probe(f, tags.audio_start, tags.audio_end, &stream) ? stream.duration_ms : 0;
-    fclose(f);
-    int id = lm_ids_get(ids, file);
-    if (id < 0) { free(file); ok = 0; break; }
-    LmTrack *track = &tracks[library->count];
-    *track = (LmTrack){id, file, duration, tags.has_art, tags.art_offset, tags.art_raw_bytes, tags.art_unsync};
-    add_track_json(&j, library->count == 0, id, file, &tags, duration, tags.track);
-    library->count++;
   }
-  closedir(dir);
-  json_text(&j, "]");
-  if (!ok || j.failed) {
-    if (library) { library->tracks = tracks; lm_library_free(library); }
-    else free(tracks);
-    free(j.bytes);
-    return NULL;
+  free(buffer);
+  free(tags);
+}
+
+LmLibrary *lm_library_scan_with(const char *root, LmIds *ids, int max_tracks, const atomic_int *stop,
+    const LmScanOptions *options) {
+  static const LmScanOptions none = {0};
+  if (!options) options = &none;
+  if (options->stats) memset(options->stats, 0, sizeof *options->stats);
+  LmDirList list;
+  int listed = lm_dir_list(root, max_tracks, &list);
+  if (listed < 0) return NULL;
+  if (listed == 0) return lm_library_empty();
+  int count = list.count;
+  const LmCacheEntry **hits = calloc((size_t)(count ? count : 1), sizeof *hits);
+  int *indices = malloc((size_t)(count ? count : 1) * sizeof *indices);
+  Jobs jobs = {root, &list, indices, 0, 0, calloc((size_t)(count ? count : 1), sizeof(LmCacheEntry)),
+    calloc((size_t)(count ? count : 1), 1), stop, 0, options};
+  int ok = hits && indices && jobs.parsed && jobs.read;
+  for (int i = 0; ok && i < count; i++) {
+    hits[i] = options->previous ? lm_cache_find(options->previous, list.entries[i].name, list.entries[i].size) : NULL;
+    if (!hits[i]) indices[jobs.job_count++] = i;
   }
-  library->tracks = tracks;
-  library->json = j.bytes;
-  library->json_length = j.length;
+  if (ok) {
+    /* Opening a file dominates (about 28 ms with its close, Azahar) and two readers overlap
+     * their opens almost perfectly; a third adds nothing. */
+    Reader helper = {&jobs, 0}, self = {&jobs, 1};
+    void *thread = options->start && jobs.job_count > 1 ? options->start(read_files, &helper) : NULL;
+    read_files(&self);
+    if (thread) options->join(thread);
+    ok = !atomic_load(&jobs.failed) && !(stop && atomic_load(stop));
+  }
+  Builder b;
+  builder_init(&b, max_tracks);
+  if (!ok) b.ok = 0;
+  int parsed = 0;
+  for (int i = 0; b.ok && i < count; i++) {
+    const LmCacheEntry *use = hits[i] ? hits[i] : jobs.read[i] ? &jobs.parsed[i] : NULL;
+    if (jobs.read && jobs.read[i]) parsed++;
+    if (!use) continue;
+    if (!builder_add(&b, ids, use)) break;
+    if (options->next && !lm_cache_add(options->next, use)) b.ok = 0;
+  }
+  for (int i = 0; jobs.parsed && i < count; i++) lm_cache_entry_free(&jobs.parsed[i]);
+  free(jobs.parsed);
+  free(jobs.read);
+  free(indices);
+  free(hits);
+  lm_dir_free(&list);
+  LmLibrary *library = builder_finish(&b);
+  if (library && options->stats) {
+    options->stats->files = library->count;
+    options->stats->parsed = parsed;
+  }
+  return library;
+}
+
+LmLibrary *lm_library_from_cache(const LmCache *cache, LmIds *ids, int max_tracks) {
+  Builder b;
+  builder_init(&b, max_tracks);
+  for (int i = 0; i < cache->count && b.ok; i++)
+    if (!builder_add(&b, ids, &cache->entries[i])) break;
+  LmLibrary *library = builder_finish(&b);
+  if (library) library->provisional = 1;
   return library;
 }
