@@ -23,7 +23,14 @@ Result threadJoin(Thread t, u64 timeout) { (void)timeout; pthread_join(t->thread
 void threadFree(Thread t) { free(t); }
 Result svcGetThreadPriority(s32 *out, Handle h) { (void)h; *out = 0x30; return 0; }
 void svcSleepThread(s64 ns) { struct timespec ts = {ns / 1000000000, ns % 1000000000}; nanosleep(&ts, NULL); }
-u64 svcGetSystemTick(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (u64)ts.tv_sec * 1000000000ULL + (u64)ts.tv_nsec; }
+/* The clock is real time plus a skew that grows by `tick_step` at every reading. */
+static _Atomic u64 tick_step, tick_skew;
+void fake_tick_step(uint64_t ns) { atomic_store(&tick_step, ns); }
+u64 svcGetSystemTick(void) {
+  struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+  u64 skew = atomic_fetch_add(&tick_skew, atomic_load(&tick_step)) + atomic_load(&tick_step);
+  return (u64)ts.tv_sec * 1000000000ULL + (u64)ts.tv_nsec + skew;
+}
 
 typedef struct { pthread_mutex_t lock; pthread_cond_t cond; int signaled; } EventImpl;
 static pthread_mutex_t hold_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -75,7 +82,27 @@ static unsigned adds;
 Result ndspInit(void) { return 0; }
 void ndspExit(void) {}
 void ndspSetOutputMode(int mode) { (void)mode; }
-void ndspChnReset(int id) { (void)id; }
+/* A reset starts each open's configure: it counts, records the wavebufs queued since the
+ * previous one, and waits while the test holds configures. */
+static pthread_mutex_t configure_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t configure_cond = PTHREAD_COND_INITIALIZER;
+static bool configure_held;
+static atomic_uint configures, adds_at_reset, adds_before_reset;
+void fake_hold_configure(bool held) {
+  pthread_mutex_lock(&configure_lock); configure_held = held; pthread_cond_broadcast(&configure_cond); pthread_mutex_unlock(&configure_lock);
+}
+unsigned fake_configures(void) { return atomic_load(&configures); }
+unsigned fake_adds_before_reset(void) { return atomic_load(&adds_before_reset); }
+unsigned fake_adds(void);
+void ndspChnReset(int id) {
+  (void)id;
+  unsigned now = fake_adds();
+  atomic_store(&adds_before_reset, now - atomic_exchange(&adds_at_reset, now));
+  atomic_fetch_add(&configures, 1);
+  pthread_mutex_lock(&configure_lock);
+  while (configure_held) pthread_cond_wait(&configure_cond, &configure_lock);
+  pthread_mutex_unlock(&configure_lock);
+}
 void ndspChnSetInterp(int id, int type) { (void)id; (void)type; }
 void ndspChnSetRate(int id, float rate) { (void)id; (void)rate; }
 void ndspChnSetFormat(int id, u16 format) { (void)id; (void)format; }

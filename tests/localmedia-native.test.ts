@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { validLocalTrack, type LocalTrack } from "../contracts/spec/localmedia.ts";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -95,11 +95,13 @@ describe("media.local native units (host-compiled)", () => {
     expect(run("player-test.c", ["localmedia_player.c", "localmedia_mp3.c", "localmedia_tags.c"])).toContain("localmedia player verified");
   }, 60_000);
 
-  test("glue: snapshots, a failed open behind a seek, end-of-track waiting, session underruns, art hand-off, art during scans, out of memory", () => {
-    const music = join(scratch, "glue-music");
+  test("glue: snapshots, failed opens, end-of-track waiting, underruns, art, long names, superseded opens, decode load, art during scans, out of memory", () => {
+    // A long folder path, so a long name overflows any 300-byte path buffer.
+    const music = join(scratch, `glue-music-${"x".repeat(60)}`);
     mkdirSync(music, { recursive: true });
-    for (const [file, from] of [["a.mp3", "cbr-info.mp3"], ["b.mp3", "cbr-plain.mp3"], ["art.mp3", "tagged-v23.mp3"]]) copyFileSync(join(FIXTURES, from!), join(music, file!));
+    for (const [file, from] of [["a.mp3", "cbr-info.mp3"], ["b.mp3", "cbr-plain.mp3"], ["art.mp3", "tagged-v23.mp3"], [`${"é".repeat(123)}.mp3`, "cbr-info.mp3"]]) copyFileSync(join(FIXTURES, from!), join(music, file!));
     for (let i = 0; i < 300; i++) copyFileSync(join(FIXTURES, "cbr-plain.mp3"), join(music, `pad-${String(i).padStart(3, "0")}.mp3`));
+    writeFileSync(join(music, "short.mp3"), readFileSync(join(FIXTURES, "cbr-plain.mp3")).subarray(0, 5000));
     writeFileSync(join(music, "junk.mp3"), Buffer.alloc(70_000, 0x11));
     const glue = join(FIXTURES, "glue");
     const binary = join(scratch, "glue-test");

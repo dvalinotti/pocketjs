@@ -1,7 +1,8 @@
 /* The media.local glue (hosts/3ds/src/localmedia.c) on the host: real threads,
  * mail slots and status, the fake NDSP and core textures of glue-fake.c, and a
- * music folder (LOCALMEDIA_ROOT) holding a.mp3 (cbr-info), b.mp3 (cbr-plain),
- * art.mp3 (tagged-v23), junk.mp3 (no frames) and 300 pad-NNN.mp3 copies of cbr-plain. */
+ * music folder (LOCALMEDIA_ROOT, a long path) holding a.mp3 (cbr-info), b.mp3 (cbr-plain),
+ * art.mp3 (tagged-v23), junk.mp3 (no frames), short.mp3 (the first 11 frames of cbr-plain),
+ * a copy of a.mp3 under a 250-byte UTF-8 name and 300 pad-NNN.mp3 copies of cbr-plain. */
 #include "localmedia.h"
 #include "glue-fake.h"
 #include "../check.h"
@@ -62,6 +63,7 @@ int main(void) {
   WAIT_UNTIL(phase_is("error"), 2000);
   CHECK(phase_is("error"));
   CHECK(strstr(status, "MP3 frame sync not found") != NULL);
+  CHECK_INT(field(status, "durationMs"), 0); /* the failed track's scanned duration, not a.mp3's */
 
   /* End of track: with the last slots queued and nothing left to decode, the audio
    * thread keeps waiting on its event instead of spinning above the UI. */
@@ -99,8 +101,40 @@ int main(void) {
   for (int i = 0; i < 2000 && handle < 0; i++) { handle = localmedia_artwork(art); if (handle < 0) sleep_ms(1); }
   CHECK(handle > 0);
   CHECK_INT(field(read_status(), "artHandles"), 1);
+  CHECK_INT(fake_live_textures(), 1); /* the cover alone: nothing is held back for handle 0 */
   localmedia_release_artwork(handle);
   CHECK_INT(field(read_status(), "artHandles"), 0);
+
+  /* A 250-byte UTF-8 name opens: no path is cut short. */
+  char long_name[300] = "";
+  for (int i = 0; i < 123; i++) strcat(long_name, "\xc3\xa9");
+  strcat(long_name, ".mp3");
+  int longest = id_of(long_name);
+  CHECK(longest >= 0);
+  CHECK(localmedia_open(longest) > 0);
+  WAIT_UNTIL(phase_is("playing"), 2000);
+  CHECK(phase_is("playing"));
+
+  /* A superseded open queues no audio: b is opened while a's open is still configuring. */
+  fake_hold_configure(true);
+  unsigned configures = fake_configures();
+  int32_t serial = localmedia_open(a);
+  WAIT_UNTIL(fake_configures() > configures, 2000);
+  CHECK(fake_configures() > configures);
+  CHECK_INT(localmedia_open(b), serial + 1);
+  fake_hold_configure(false);
+  WAIT_UNTIL(fake_configures() > configures + 1 && phase_is("playing"), 2000);
+  CHECK(phase_is("playing"));
+  CHECK_INT(fake_adds_before_reset(), 0);
+
+  /* The prefill's decoding counts toward decodeLoad: short.mp3 is decoded by its prefill alone. */
+  sleep_ms(2100); /* b is fully queued: two whole one-second windows pass with nothing decoded */
+  CHECK_INT(field(read_status(), "decodeLoad"), 0);
+  fake_tick_step(50000000); /* every clock reading costs 50 ms */
+  CHECK(localmedia_open(id_of("short.mp3")) > 0);
+  WAIT_UNTIL(field(read_status(), "decodeLoad") > 0, 3000);
+  fake_tick_step(0);
+  CHECK(field(status, "decodeLoad") > 0);
 
   /* Art is served between scanned files: a cover asked for during a full rescan arrives before
    * the rescan ends. */

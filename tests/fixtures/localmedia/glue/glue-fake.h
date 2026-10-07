@@ -12,6 +12,13 @@ uint32_t fake_drain(uint32_t frames);
 /* Wavebufs queued and not yet played; wavebufs ever queued. */
 int fake_queued(void);
 unsigned fake_adds(void);
+/* While held, an open waits inside its configure (at ndspChnReset). */
+void fake_hold_configure(bool held);
+/* Configures started so far; wavebufs queued between the last two. */
+unsigned fake_configures(void);
+unsigned fake_adds_before_reset(void);
+/* From now on every svcGetSystemTick reading moves the clock `ns` further on (0: real time). */
+void fake_tick_step(uint64_t ns);
 /* Core textures uploaded and not freed. */
 int fake_live_textures(void);
 #endif

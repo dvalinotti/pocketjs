@@ -33,6 +33,8 @@
 #define PREFILL_SLOTS 4
 #define WAKE_NS 10000000LL
 #define MAX_ART_HANDLES 32
+/* Folder plus name: SD card names reach 255 UTF-16 units, up to 765 UTF-8 bytes. */
+#define PATH_BYTES 1024
 
 enum { IDLE, LOADING, PLAYING, PAUSED, ENDED, FAILED };
 enum { ERR_NONE, ERR_NOT_FOUND, ERR_NO_SYNC, ERR_UNREADABLE, ERR_READ, ERR_DSP_FIRMWARE, ERR_AUDIO };
@@ -45,10 +47,10 @@ static const char *const ERRORS[] = {"", "File not found", "MP3 frame sync not f
 typedef struct {
   _Atomic unsigned sequence;
   unsigned generation;          /* 0: never written */
-  uint32_t ms;
+  uint32_t ms;                  /* open: the track's scanned duration; seek: the target */
   long offset, raw_bytes;
   int unsync;
-  char path[300];               /* open: the file ("" stops playback) */
+  char path[PATH_BYTES];        /* open: the file ("" stops playback) */
 } Mail;
 
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "media.local handoff must be lock-free");
@@ -119,7 +121,6 @@ static unsigned art_generation;
 static bool art_handed_out;
 static int32_t art_handles[MAX_ART_HANDLES];
 static int art_handle_count;
-static int32_t reserved_handle = -1;
 
 /* ---- NDSP sink (audio thread) ----------------------------------------------- */
 static ndspWaveBuf waves[LM_SLOTS];
@@ -168,6 +169,8 @@ static const LmSink SINK = {NULL, sink_free, sink_data, sink_queue, sink_configu
 /* ---- audio thread ------------------------------------------------------------ */
 static LmPlayer player;
 static bool player_open;
+/* The open's scanned duration: what a failed open reports. */
+static unsigned open_duration;
 /* Underruns of the players closed so far: the status counts them for the session. */
 static unsigned closed_underruns;
 
@@ -179,7 +182,7 @@ static void publish(unsigned generation, unsigned phase, unsigned error) {
   atomic_store(&work_phase, phase);
   atomic_store(&work_error, error);
   atomic_store(&work_position, player_open ? lm_player_position(&player) : 0);
-  if (player_open) atomic_store(&work_duration, lm_player_duration(&player));
+  atomic_store(&work_duration, player_open ? lm_player_duration(&player) : open_duration);
   atomic_store(&underruns, closed_underruns + (player_open ? player.underruns : 0));
   atomic_store_explicit(&published, generation, memory_order_release);
 }
@@ -214,6 +217,7 @@ static void audio_main(void *unused) {
       generation = mail.generation;
       handled = true;
       close_player();
+      open_duration = mail.ms;
       phase = IDLE;
       error = ERR_NONE;
       if (mail.path[0] == '\0') {
@@ -236,10 +240,13 @@ static void audio_main(void *unused) {
       handled = true;
       if (player_open) { lm_player_seek(&player, mail.ms); restart = true; }
     }
-    if (restart) {
+    /* A newer command arrived while this one opened or seeked: leave the prefill to it. */
+    if (restart && current(generation)) {
       applied_paused = atomic_load(&paused_flag);
       ndspChnSetPaused(CHANNEL, applied_paused);
+      uint64_t before = player.decode_ticks;
       LmPump state = lm_player_pump(&player, PREFILL_SLOTS);
+      window_decode += player.decode_ticks - before;
       phase = state == LM_PUMP_ERROR ? FAILED : state == LM_PUMP_ENDED ? ENDED : PLAYING;
       error = phase == FAILED ? error_of(player.message) : ERR_NONE;
     }
@@ -469,8 +476,6 @@ void localmedia_forget_guest(void) {
   atomic_store(&paused_flag, false);
   for (int i = 0; i < art_handle_count; i++) ui_free_texture(art_handles[i]);
   art_handle_count = 0;
-  if (reserved_handle >= 0) ui_free_texture(reserved_handle);
-  reserved_handle = -1;
   art_id = -1;
 }
 
@@ -493,7 +498,7 @@ int32_t localmedia_open(int32_t id) {
   adopt_scan();
   const LmTrack *track = lm_library_find(library, id);
   if (!track) return 0;
-  char path[300];
+  char path[PATH_BYTES];
   snprintf(path, sizeof path, "%s%s", ROOT, track->file);
   open_serial++;
   command_track = id;
@@ -502,7 +507,7 @@ int32_t localmedia_open(int32_t id) {
   command_duration = track->duration_ms;
   resumed_while_loading = false;
   atomic_store(&paused_flag, false);
-  post(&open_mail, 0, path);
+  post(&open_mail, track->duration_ms, path);
   return (int32_t)open_serial;
 }
 
@@ -548,11 +553,12 @@ void localmedia_status(char *out, size_t capacity) {
     art_handle_count);
 }
 
-/* Uploads the finished pixels; never hands out core handle 0 (the contract's "none"). */
+/* Uploads the finished pixels; never hands out core handle 0 (the contract's "none"). A
+ * handle carries its slot's generation, so once 0 is freed the next upload is another. */
 static int32_t upload_art(void) {
   int32_t handle = ui_upload_texture(art_pixels, LM_ART_PIXELS_BYTES, LM_ART_EDGE, LM_ART_EDGE, 3);
   if (handle == 0) {
-    reserved_handle = handle;
+    ui_free_texture(handle);
     handle = ui_upload_texture(art_pixels, LM_ART_PIXELS_BYTES, LM_ART_EDGE, LM_ART_EDGE, 3);
   }
   if (handle <= 0 || art_handle_count >= MAX_ART_HANDLES) {
