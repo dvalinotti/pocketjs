@@ -26,6 +26,10 @@ describe("media.local native units (host-compiled)", () => {
     expect(run("ids-test.c", ["localmedia_ids.c"])).toContain("localmedia ids verified");
   }, 60_000);
 
+  test("ring: writes, wraps, converts channels, copies, resamples forward/backward/fractional, ramps, clamps", () => {
+    expect(run("ring-test.c", ["localmedia_ring.c"])).toContain("localmedia ring verified");
+  }, 60_000);
+
   test("tags: v2.2/2.3/2.4 fields, encodings, unsync, pictures, v1 fallback, broken input", () => {
     expect(run("tags-test.c", ["localmedia_tags.c"])).toContain("localmedia tags verified");
   }, 60_000);
