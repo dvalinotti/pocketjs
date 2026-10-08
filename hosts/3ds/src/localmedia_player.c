@@ -132,6 +132,8 @@ void lm_player_seek(LmPlayer *p, uint32_t ms) {
   p->base_ms = ms;
   lm_ring_reset(&p->ring);
   p->head = 0;
+  p->scratching = 0;
+  p->scratch_rate = p->scratch_applied = 0;
   p->position_ms = ms;
   p->queued_once = 0;
   p->starved = 0;
@@ -174,9 +176,62 @@ static int fill_slot(LmPlayer *p, int slot) {
   return frames;
 }
 
+/* The ring frame the slot's `played`-th output frame read. */
+static int64_t slot_frame(const LmPlayer *p, int slot, uint32_t played) {
+  return p->slot_start[slot] + (int64_t)played * p->slot_rate[slot] / LM_RATE_ONE;
+}
+
+/* A ring frame clamped to the frames held, or the end just past the newest. */
+static int64_t held_frame(const LmPlayer *p, int64_t frame) {
+  int64_t oldest = (int64_t)lm_ring_oldest(&p->ring), newest = (int64_t)p->ring.written;
+  return frame < oldest ? oldest : frame > newest ? newest : frame;
+}
+
+/* The ring frame being heard: in the playing slot; else the start of the oldest queued slot
+ * (queued, not started); else where the next slot reads. */
+static int64_t playhead(const LmPlayer *p) {
+  uint32_t played;
+  int slot = p->sink->playing(p->sink->ctx, &played);
+  if (slot >= 0) return held_frame(p, slot_frame(p, slot, played));
+  int oldest = -1;
+  for (int s = 0; s < LM_SLOTS; s++)
+    if (!p->sink->slot_free(p->sink->ctx, s) && (oldest < 0 || p->slot_seq[s] < p->slot_seq[oldest])) oldest = s;
+  if (oldest >= 0) return held_frame(p, p->slot_start[oldest]);
+  return held_frame(p, p->scratching ? p->scratch_head / LM_POS_ONE : (int64_t)p->head);
+}
+
+/* Fills one scratch slot: ramps from the last slot's rate to the guest's, decoding ahead first
+ * while the platter moves forward. */
+static void fill_scratch_slot(LmPlayer *p, int slot) {
+  int32_t from = p->scratch_applied, to = p->scratch_rate;
+  int32_t fastest = from > to ? from : to;
+  if (fastest > 0) {
+    uint64_t at = p->scratch_head > 0 ? (uint64_t)(p->scratch_head / LM_POS_ONE) : 0;
+    decode_ahead(p, at, (uint64_t)(2 * LM_SCRATCH_FRAMES) * (uint64_t)fastest / LM_RATE_ONE + 2);
+  }
+  /* The slot starts where its first frame reads: the head clamped as the resampler clamps it. */
+  LmRingPos lo = (LmRingPos)lm_ring_oldest(&p->ring) * LM_POS_ONE;
+  LmRingPos hi = p->ring.written > 0 ? (LmRingPos)(p->ring.written - 1) * LM_POS_ONE : 0;
+  if (p->scratch_head < lo) p->scratch_head = lo;
+  if (p->scratch_head > hi) p->scratch_head = hi;
+  int64_t start = p->scratch_head / LM_POS_ONE;
+  p->scratch_head = lm_ring_resample(&p->ring, p->scratch_head, from, to, p->sink->slot_data(p->sink->ctx, slot), LM_SCRATCH_FRAMES);
+  queue_slot(p, slot, LM_SCRATCH_FRAMES, start, (int32_t)(((int64_t)from + to) / 2));
+  p->scratch_applied = to;
+}
+
 LmPump lm_player_pump(LmPlayer *p, int max_slots) {
   if (!p->file) return LM_PUMP_ERROR;
   int queued = lm_player_queued(p);
+  if (p->scratching) {
+    for (int slot = 0; slot < LM_SLOTS && max_slots > 0 && queued < LM_SCRATCH_QUEUE && !p->error; slot++) {
+      if (!p->sink->slot_free(p->sink->ctx, slot)) continue;
+      fill_scratch_slot(p, slot);
+      queued++;
+      max_slots--;
+    }
+    return p->error ? LM_PUMP_ERROR : LM_PUMP_PLAYING;
+  }
   if (queued == 0 && p->queued_once && !p->eof && !p->error && !p->starved) {
     p->underruns++;
     p->starved = 1;
@@ -194,27 +249,54 @@ LmPump lm_player_pump(LmPlayer *p, int max_slots) {
   return LM_PUMP_PLAYING;
 }
 
-/* The ring frame the slot's `played`-th output frame read. */
-static int64_t slot_frame(const LmPlayer *p, int slot, uint32_t played) {
-  return p->slot_start[slot] + (int64_t)played * p->slot_rate[slot] / LM_RATE_ONE;
-}
-
 uint32_t lm_player_position(LmPlayer *p) {
   uint32_t played;
   int slot = p->sink->playing(p->sink->ctx, &played);
-  uint32_t ms;
-  if (slot >= 0) ms = ms_at(p, slot_frame(p, slot, played));
+  int64_t frame;
+  if (slot >= 0) frame = slot_frame(p, slot, played);
   /* Nothing is playing or waiting: everything queued so far has been heard. (Slots
    * queued before the DSP starts the first have not been.) */
-  else if (p->queued_once && lm_player_queued(p) == 0) ms = ms_at(p, (int64_t)p->head);
+  else if (p->queued_once && lm_player_queued(p) == 0) frame = p->scratching ? p->scratch_head / LM_POS_ONE : (int64_t)p->head;
   else return p->position_ms;
-  /* Normal playback moves forward only: a wavebuf handover can pair the next slot's start
-   * with a stale sample count for a moment. */
-  if (ms > p->position_ms) p->position_ms = ms;
+  /* A scratch moves both ways, inside the frames held. Normal playback moves forward only: a
+   * wavebuf handover can pair the next slot's start with a stale sample count for a moment. */
+  if (p->scratching) p->position_ms = ms_at(p, held_frame(p, frame));
+  else if (ms_at(p, frame) > p->position_ms) p->position_ms = ms_at(p, frame);
   return p->position_ms;
 }
 
 uint32_t lm_player_duration(const LmPlayer *p) {
   if (p->eof && lm_player_queued(p) == 0) return decoded_ms(p);
   return p->stream.duration_ms;
+}
+
+int lm_player_can_scratch(const LmPlayer *p) { return p->ring.capacity >= LM_RING_FRAMES; }
+
+int lm_player_scratch_begin(LmPlayer *p) {
+  if (!p->file || p->scratching || !lm_player_can_scratch(p)) return 0;
+  int64_t at = playhead(p);
+  p->sink->clear(p->sink->ctx);
+  p->scratching = 1;
+  p->scratch_head = (LmRingPos)at * LM_POS_ONE;
+  p->scratch_rate = p->scratch_applied = 0;
+  p->position_ms = ms_at(p, at);
+  p->queued_once = 0;
+  p->starved = 0;
+  return 1;
+}
+
+void lm_player_scratch_rate(LmPlayer *p, int32_t rate) {
+  p->scratch_rate = rate > LM_SCRATCH_MAX_RATE ? LM_SCRATCH_MAX_RATE : rate < -LM_SCRATCH_MAX_RATE ? -LM_SCRATCH_MAX_RATE : rate;
+}
+
+void lm_player_scratch_end(LmPlayer *p) {
+  if (!p->scratching) return;
+  int64_t at = playhead(p);
+  p->sink->clear(p->sink->ctx);
+  p->scratching = 0;
+  p->scratch_rate = p->scratch_applied = 0;
+  p->head = (uint64_t)at;
+  p->position_ms = ms_at(p, at);
+  p->queued_once = 0;
+  p->starved = 0;
 }

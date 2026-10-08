@@ -24,6 +24,11 @@
 #define LM_SLOT_FRAMES 4608
 /* Consecutive bytes that decode to nothing before the stream counts as unreadable. */
 #define LM_JUNK_LIMIT 65536
+/* Scratch slots: 1024 frames (about 23 ms at 44.1 kHz), kept three deep. */
+#define LM_SCRATCH_FRAMES 1024
+#define LM_SCRATCH_QUEUE 3
+/* The fastest scratch either way: 4x. */
+#define LM_SCRATCH_MAX_RATE (4 * LM_RATE_ONE)
 
 typedef struct {
   void *ctx;
@@ -63,6 +68,10 @@ typedef struct {
   int32_t slot_rate[LM_SLOTS];  /* the slot's mean rate, 16.16 ring frames per output frame */
   uint32_t slot_seq[LM_SLOTS];  /* queue order: larger was queued later */
   uint32_t next_seq;
+  int scratching;            /* the guest holds the platter: slots resample the ring */
+  LmRingPos scratch_head;    /* where the next scratch slot reads */
+  int32_t scratch_rate;      /* the guest's rate (16.16) */
+  int32_t scratch_applied;   /* the rate the last scratch slot ended on (16.16) */
   uint32_t position_ms;      /* last reported position (moves forward only in normal playback) */
   int queued_once;           /* a slot was queued since open/seek */
   int starved;               /* the current underrun was counted */
@@ -81,12 +90,26 @@ void lm_player_close(LmPlayer *p);
 /* Restarts output at ms (clamped to the duration). */
 void lm_player_seek(LmPlayer *p, uint32_t ms);
 /* Counts an underrun when everything queued has played before the end, then fills up
- * to max_slots free slots. Reports ENDED once the last slot has played. */
+ * to max_slots free slots. Reports ENDED once the last slot has played. While scratching it
+ * fills free slots while fewer than LM_SCRATCH_QUEUE are queued (at most max_slots), counts no
+ * underruns and never reports ENDED. */
 LmPump lm_player_pump(LmPlayer *p, int max_slots);
 /* Slots queued and not yet played. */
 int lm_player_queued(const LmPlayer *p);
 uint32_t lm_player_position(LmPlayer *p);
 /* The probed duration; after the end, the length actually decoded. */
 uint32_t lm_player_duration(const LmPlayer *p);
+
+/* 1 when the ring can scratch (LM_RING_FRAMES frames). */
+int lm_player_can_scratch(const LmPlayer *p);
+/* Drops the queued audio and latches the scratch head at the frame being heard; slots then follow
+ * lm_player_scratch_rate, initially 0 (silence). Returns 1 when scratching started; 0 with no
+ * file, while scratching, or with a ring too small. */
+int lm_player_scratch_begin(LmPlayer *p);
+/* The guest's rate, 16.16 ring frames per output frame, clamped to +-LM_SCRATCH_MAX_RATE. Each
+ * scratch slot ramps from the previous slot's rate to it. */
+void lm_player_scratch_rate(LmPlayer *p, int32_t rate);
+/* Drops the scratch slots and resumes normal slots at the frame being heard. */
+void lm_player_scratch_end(LmPlayer *p);
 
 #endif

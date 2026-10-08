@@ -99,6 +99,10 @@ describe("media.local native units (host-compiled)", () => {
     expect(run("player-test.c", ["localmedia_player.c", "localmedia_ring.c", "localmedia_mp3.c", "localmedia_tags.c"])).toContain("localmedia player verified");
   }, 60_000);
 
+  test("player scratch: begin latches the heard frame, reverse and forward read the ring, end resumes seamlessly, edges hold, never ends", () => {
+    expect(run("player-scratch-test.c", ["localmedia_player.c", "localmedia_ring.c", "localmedia_mp3.c", "localmedia_tags.c"])).toContain("localmedia player scratch verified");
+  }, 60_000);
+
   test("glue: snapshots, failed opens, end-of-track waiting, underruns, art, long names, superseded opens, decode load, art during scans, out of memory", () => {
     // A long folder path, so a long name overflows any 300-byte path buffer.
     const music = join(scratch, `glue-music-${"x".repeat(60)}`);
