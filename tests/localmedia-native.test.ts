@@ -96,7 +96,7 @@ describe("media.local native units (host-compiled)", () => {
   }, 60_000);
 
   test("player: decodes, positions, seeks, ends, counts underruns, reports unreadable files", () => {
-    expect(run("player-test.c", ["localmedia_player.c", "localmedia_mp3.c", "localmedia_tags.c"])).toContain("localmedia player verified");
+    expect(run("player-test.c", ["localmedia_player.c", "localmedia_ring.c", "localmedia_mp3.c", "localmedia_tags.c"])).toContain("localmedia player verified");
   }, 60_000);
 
   test("glue: snapshots, failed opens, end-of-track waiting, underruns, art, long names, superseded opens, decode load, art during scans, out of memory", () => {
@@ -109,7 +109,7 @@ describe("media.local native units (host-compiled)", () => {
     writeFileSync(join(music, "junk.mp3"), Buffer.alloc(70_000, 0x11));
     const glue = join(FIXTURES, "glue");
     const binary = join(scratch, "glue-test");
-    const units = ["localmedia.c", "localmedia_cache.c", "localmedia_dir.c", "localmedia_ids.c", "localmedia_tags.c", "localmedia_mp3.c", "localmedia_art.c", "localmedia_library.c", "localmedia_player.c"];
+    const units = ["localmedia.c", "localmedia_cache.c", "localmedia_dir.c", "localmedia_ids.c", "localmedia_tags.c", "localmedia_mp3.c", "localmedia_art.c", "localmedia_library.c", "localmedia_player.c", "localmedia_ring.c"];
     const compile = Bun.spawnSync(["cc", "-std=c11", "-D_DEFAULT_SOURCE", "-O1", "-g", "-pthread", "-fsanitize=address,undefined", "-fno-sanitize-recover=undefined",
       "-DLM_TEST_ALLOC_FAIL", `-DLOCALMEDIA_ROOT="${music}/"`, `-DLOCALMEDIA_CACHE_DIR="${join(scratch, "glue-cache")}"`, `-I${glue}`, `-I${join(ROOT, "hosts/3ds/include")}`, `-I${SRC}`, `-I${join(ROOT, "hosts/3ds/vendor")}`,
       join(glue, "glue-test.c"), join(glue, "glue-fake.c"), join(FIXTURES, "alloc-fail.c"), ...units.map((unit) => join(SRC, unit)), "-o", binary]);

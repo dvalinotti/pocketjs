@@ -46,9 +46,10 @@ static void restart_input(LmPlayer *p, long offset) {
   p->junk = 0;
 }
 
-/* Decodes the next frame into p->pcm. Returns its per-channel frame count, or 0 at the
- * end of the stream or on error. */
-static int decode_frame(LmPlayer *p, int *channels) {
+/* Decodes the next frame into the ring. A valid frame whose bit reservoir was lost (the first
+ * frames after a seek) appends its length in silence, so a ring frame is a decoded frame.
+ * Returns the frames appended, or 0 at the end of the stream or on error. */
+static int decode_frame(LmPlayer *p) {
   for (;;) {
     if (p->error) return 0;
     size_t avail = p->input_length - p->input_used;
@@ -69,21 +70,24 @@ static int decode_frame(LmPlayer *p, int *channels) {
     p->input_used += (size_t)info.frame_bytes;
     if (samples > 0) {
       p->junk = 0;
-      *channels = info.channels;
+      lm_ring_write(&p->ring, p->pcm, samples, info.channels);
       return samples;
     }
     if (info.hz > 0) {
-      /* A valid frame whose bit reservoir was lost (the first frames after a seek):
-       * its time passes without audio. */
-      p->decoded += (uint64_t)p->stream.first.samples;
-      continue;
+      lm_ring_silence(&p->ring, (int)p->stream.first.samples);
+      return (int)p->stream.first.samples;
     }
     p->junk += info.frame_bytes;
     if (p->junk >= LM_JUNK_LIMIT) { p->error = 1; set_message(p, "MP3 data unreadable"); return 0; }
   }
 }
 
-int lm_player_open(LmPlayer *p, const LmSink *sink, const char *path) {
+/* Decodes until the ring holds `ahead` frames past `from`, or the stream ends. */
+static void decode_ahead(LmPlayer *p, uint64_t from, uint64_t ahead) {
+  while (!p->eof && !p->error && p->ring.written < from + ahead && decode_frame(p) > 0) {}
+}
+
+int lm_player_open(LmPlayer *p, const LmSink *sink, int16_t *ring_pcm, uint32_t ring_frames, const char *path) {
   memset(p, 0, sizeof *p);
   p->sink = sink;
   p->file = fopen(path, "rb");
@@ -100,6 +104,7 @@ int lm_player_open(LmPlayer *p, const LmSink *sink, const char *path) {
   }
   p->rate = p->stream.first.sample_rate;
   p->channels = p->stream.first.channels;
+  lm_ring_init(&p->ring, ring_pcm, ring_frames, p->channels);
   sink->configure(sink->ctx, p->rate, p->channels);
   restart_input(p, p->stream.data_start);
   return 1;
@@ -125,7 +130,8 @@ void lm_player_seek(LmPlayer *p, uint32_t ms) {
   restart_input(p, at < 0 ? p->stream.data_end : at);
   p->error = 0;
   p->base_ms = ms;
-  p->decoded = 0;
+  lm_ring_reset(&p->ring);
+  p->head = 0;
   p->position_ms = ms;
   p->queued_once = 0;
   p->starved = 0;
@@ -137,36 +143,34 @@ int lm_player_queued(const LmPlayer *p) {
   return queued;
 }
 
-static uint32_t frames_ms(const LmPlayer *p, uint64_t frames) {
-  return p->base_ms + (uint32_t)(frames * 1000 / (uint64_t)p->rate);
+/* The time of a ring frame (frames before ring frame 0 read as its time). */
+static uint32_t ms_at(const LmPlayer *p, int64_t frames) {
+  if (frames < 0) frames = 0;
+  return p->base_ms + (uint32_t)((uint64_t)frames * 1000 / (uint64_t)p->rate);
 }
 
 static uint32_t decoded_ms(const LmPlayer *p) {
-  return frames_ms(p, p->decoded);
+  return ms_at(p, (int64_t)p->ring.written);
 }
 
-/* Fills one slot; returns its frame count (0 when nothing was left to decode). */
+static void queue_slot(LmPlayer *p, int slot, int frames, int64_t start, int32_t rate) {
+  p->slot_start[slot] = start;
+  p->slot_rate[slot] = rate;
+  p->slot_seq[slot] = ++p->next_seq;
+  p->sink->queue(p->sink->ctx, slot, frames);
+  p->queued_once = 1;
+  p->starved = 0;
+}
+
+/* Fills one slot from the head; returns its frame count (0 when nothing was left). */
 static int fill_slot(LmPlayer *p, int slot) {
-  int16_t *out = p->sink->slot_data(p->sink->ctx, slot);
-  int frames = 0;
-  uint64_t start = p->decoded;
-  while (frames + 1152 <= LM_SLOT_FRAMES) {
-    int channels = p->channels;
-    int samples = decode_frame(p, &channels);
-    if (samples == 0) break;
-    int16_t *dst = out + frames * p->channels;
-    if (channels == p->channels) memcpy(dst, p->pcm, (size_t)samples * (size_t)channels * sizeof *dst);
-    else if (p->channels == 2) for (int i = 0; i < samples; i++) dst[i * 2] = dst[i * 2 + 1] = p->pcm[i];
-    else for (int i = 0; i < samples; i++) dst[i] = (int16_t)((p->pcm[i * 2] + p->pcm[i * 2 + 1]) / 2);
-    frames += samples;
-    p->decoded += (uint64_t)samples;
-  }
-  if (frames > 0) {
-    p->slot_start[slot] = start;
-    p->sink->queue(p->sink->ctx, slot, frames);
-    p->queued_once = 1;
-    p->starved = 0;
-  }
+  decode_ahead(p, p->head, LM_SLOT_FRAMES);
+  uint64_t held = p->ring.written - p->head;
+  int frames = held < LM_SLOT_FRAMES ? (int)held : LM_SLOT_FRAMES;
+  if (frames == 0) return 0;
+  lm_ring_copy(&p->ring, p->head, p->sink->slot_data(p->sink->ctx, slot), frames);
+  queue_slot(p, slot, frames, (int64_t)p->head, LM_RATE_ONE);
+  p->head += (uint64_t)frames;
   return frames;
 }
 
@@ -177,31 +181,36 @@ LmPump lm_player_pump(LmPlayer *p, int max_slots) {
     p->underruns++;
     p->starved = 1;
   }
-  for (int slot = 0; slot < LM_SLOTS && max_slots > 0 && !p->eof && !p->error; slot++) {
+  for (int slot = 0; slot < LM_SLOTS && max_slots > 0 && !p->error && (!p->eof || p->head < p->ring.written); slot++) {
     if (!p->sink->slot_free(p->sink->ctx, slot)) continue;
     if (fill_slot(p, slot) > 0) { queued++; max_slots--; }
   }
   if (queued > 0) return LM_PUMP_PLAYING;
   if (p->error) return LM_PUMP_ERROR;
-  if (p->eof) {
-    p->position_ms = decoded_ms(p);
+  if (p->eof && p->head == p->ring.written) {
+    p->position_ms = ms_at(p, (int64_t)p->head);
     return LM_PUMP_ENDED;
   }
   return LM_PUMP_PLAYING;
 }
 
+/* The ring frame the slot's `played`-th output frame read. */
+static int64_t slot_frame(const LmPlayer *p, int slot, uint32_t played) {
+  return p->slot_start[slot] + (int64_t)played * p->slot_rate[slot] / LM_RATE_ONE;
+}
+
 uint32_t lm_player_position(LmPlayer *p) {
   uint32_t played;
   int slot = p->sink->playing(p->sink->ctx, &played);
-  if (slot >= 0) {
-    uint32_t ms = frames_ms(p, p->slot_start[slot] + played);
-    if (ms > p->position_ms) p->position_ms = ms;
-  } else if (p->queued_once && lm_player_queued(p) == 0) {
-    /* Nothing is playing or waiting: everything decoded so far has been heard. (Slots
-     * queued before the DSP starts the first have not been.) */
-    uint32_t ms = decoded_ms(p);
-    if (ms > p->position_ms) p->position_ms = ms;
-  }
+  uint32_t ms;
+  if (slot >= 0) ms = ms_at(p, slot_frame(p, slot, played));
+  /* Nothing is playing or waiting: everything queued so far has been heard. (Slots
+   * queued before the DSP starts the first have not been.) */
+  else if (p->queued_once && lm_player_queued(p) == 0) ms = ms_at(p, (int64_t)p->head);
+  else return p->position_ms;
+  /* Normal playback moves forward only: a wavebuf handover can pair the next slot's start
+   * with a stale sample count for a moment. */
+  if (ms > p->position_ms) p->position_ms = ms;
   return p->position_ms;
 }
 

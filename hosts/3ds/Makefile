@@ -111,7 +111,7 @@ LDFLAGS := -specs=3dsx.specs $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/pocketj
 LIBPATHS := -L$(DEVKITPRO)/libctru/lib
 LIBS := -lcitro3d -lctru -lm
 
-OBJECTS := $(BUILD)/main.o $(BUILD)/media.o $(BUILD)/localmedia.o $(BUILD)/localmedia_ids.o $(BUILD)/localmedia_tags.o $(BUILD)/localmedia_mp3.o $(BUILD)/localmedia_art.o $(BUILD)/localmedia_library.o $(BUILD)/localmedia_cache.o $(BUILD)/localmedia_dir.o $(BUILD)/localmedia_player.o $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/vshader_shbin.o
+OBJECTS := $(BUILD)/main.o $(BUILD)/media.o $(BUILD)/localmedia.o $(BUILD)/localmedia_ids.o $(BUILD)/localmedia_tags.o $(BUILD)/localmedia_mp3.o $(BUILD)/localmedia_art.o $(BUILD)/localmedia_library.o $(BUILD)/localmedia_cache.o $(BUILD)/localmedia_dir.o $(BUILD)/localmedia_player.o $(BUILD)/localmedia_ring.o $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/vshader_shbin.o
 ELF := $(BUILD)/pocketjs-3ds.elf
 SMDH := $(BUILD)/pocketjs-3ds.smdh
 
@@ -162,7 +162,8 @@ $(BUILD)/main.o $(BUILD)/qjs.o $(BUILD)/gfx.o: $(SOURCE)/media.h
 $(BUILD)/main.o $(BUILD)/qjs.o: $(SOURCE)/localmedia.h
 $(BUILD)/localmedia.o: $(wildcard $(SOURCE)/localmedia*.h)
 $(BUILD)/localmedia_library.o: $(SOURCE)/localmedia_library.h $(SOURCE)/localmedia_dir.h $(SOURCE)/localmedia_cache.h $(SOURCE)/localmedia_ids.h $(SOURCE)/localmedia_tags.h $(SOURCE)/localmedia_mp3.h
-$(BUILD)/localmedia_player.o: $(SOURCE)/localmedia_player.h $(SOURCE)/localmedia_mp3.h $(SOURCE)/localmedia_tags.h $(CURDIR)/vendor/minimp3.h
+$(BUILD)/localmedia_player.o: $(SOURCE)/localmedia_player.h $(SOURCE)/localmedia_ring.h $(SOURCE)/localmedia_mp3.h $(SOURCE)/localmedia_tags.h $(CURDIR)/vendor/minimp3.h
+$(BUILD)/localmedia_ring.o: $(SOURCE)/localmedia_ring.h
 $(BUILD)/localmedia_art.o: $(SOURCE)/localmedia_art.h $(CURDIR)/vendor/stb_image.h
 $(BUILD)/localmedia_ids.o: $(SOURCE)/localmedia_ids.h
 $(BUILD)/localmedia_cache.o: $(SOURCE)/localmedia_cache.h

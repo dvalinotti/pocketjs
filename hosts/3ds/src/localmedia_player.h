@@ -1,9 +1,10 @@
 /*
- * media.local playback engine: one open MP3 decoded by minimp3 into a ring
- * of PCM16 slots that an audio sink plays in submission order. Owns the
- * file, the decoder, positions, seeking, end of stream and underrun and
- * decode-time accounting. The sink (NDSP on the 3DS, a fake in the tests)
- * owns the audio buffers and reports which slot is playing.
+ * media.local playback engine: one open MP3 decoded by minimp3 into a PCM
+ * ring (localmedia_ring.h), copied from there into a ring of PCM16 slots
+ * that an audio sink plays in submission order. Owns the file, the decoder,
+ * positions, seeking, end of stream and underrun and decode-time accounting.
+ * The sink (NDSP on the 3DS, a fake in the tests) owns the audio buffers and
+ * reports which slot is playing.
  *
  * Pure C over stdio: compiled into the 3DS host and into the host-side tests.
  */
@@ -15,6 +16,7 @@
 #include <stdio.h>
 
 #include "localmedia_mp3.h"
+#include "localmedia_ring.h"
 #include "minimp3.h"
 
 #define LM_SLOTS 16
@@ -54,10 +56,14 @@ typedef struct {
   int eof;                   /* the decoder has consumed the last frame */
   int error;
   char message[48];
-  uint32_t base_ms;          /* time of the first sample decoded since open/seek */
-  uint64_t decoded;          /* per-channel frames decoded since base_ms */
-  uint64_t slot_start[LM_SLOTS]; /* per-channel frames decoded before the slot, since base_ms */
-  uint32_t position_ms;      /* last reported position (never decreases until a seek) */
+  uint32_t base_ms;          /* time of ring frame 0 (the open or the last seek) */
+  LmRing ring;               /* frames decoded since base_ms; ring.written counts them */
+  uint64_t head;             /* the ring frame the next normal slot starts at */
+  int64_t slot_start[LM_SLOTS]; /* ring frame the slot's first output frame reads */
+  int32_t slot_rate[LM_SLOTS];  /* the slot's mean rate, 16.16 ring frames per output frame */
+  uint32_t slot_seq[LM_SLOTS];  /* queue order: larger was queued later */
+  uint32_t next_seq;
+  uint32_t position_ms;      /* last reported position (moves forward only in normal playback) */
   int queued_once;           /* a slot was queued since open/seek */
   int starved;               /* the current underrun was counted */
   uint32_t underruns;
@@ -66,9 +72,10 @@ typedef struct {
   mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
 } LmPlayer;
 
-/* Opens path and configures the sink. Returns 1, or 0 with p->message set
+/* Opens path, configures the sink and decodes into ring_pcm, which holds ring_frames * 2 samples
+ * (ring_frames: a power of two, at least LM_RING_MIN_FRAMES). Returns 1, or 0 with p->message set
  * ("File not found", "MP3 frame sync not found"). */
-int lm_player_open(LmPlayer *p, const LmSink *sink, const char *path);
+int lm_player_open(LmPlayer *p, const LmSink *sink, int16_t *ring_pcm, uint32_t ring_frames, const char *path);
 /* Clears the sink and closes the file. Safe on a closed player. */
 void lm_player_close(LmPlayer *p);
 /* Restarts output at ms (clamped to the duration). */

@@ -52,6 +52,10 @@ static void advance(Fake *f, uint32_t n) {
 static Fake fake;
 static const LmSink sink = {&fake, fake_free, fake_data, fake_queue, fake_configure, fake_clear, fake_playing, fake_ticks};
 static LmPlayer player;
+/* The PCM ring: scratch-capable, and the smallest that normal playback accepts. */
+static int16_t ring_big[LM_RING_FRAMES * 2];
+static int16_t ring_small[LM_RING_MIN_FRAMES * 2];
+#define OPEN(path) lm_player_open(&player, &sink, ring_big, LM_RING_FRAMES, path)
 
 /* Plays a file to the end, pumping every 1024 frames; returns frames played. */
 static uint64_t play_through(LmPlayer *p, Fake *f) {
@@ -65,7 +69,7 @@ static uint64_t play_through(LmPlayer *p, Fake *f) {
 int main(void) {
   /* CBR with an Info frame: 40 frames of 1152 at 44.1 kHz stereo. */
   memset(&fake, 0, sizeof fake);
-  CHECK(lm_player_open(&player, &sink, "cbr-info.mp3"));
+  CHECK(OPEN("cbr-info.mp3"));
   CHECK_INT(fake.rate, 44100); CHECK_INT(fake.channels, 2);
   CHECK_INT(lm_player_duration(&player), 1044);
   CHECK_INT(lm_player_pump(&player, 4), LM_PUMP_PLAYING);
@@ -87,14 +91,14 @@ int main(void) {
 
   /* Mono MPEG-2 at 22.05 kHz plays as mono. */
   memset(&fake, 0, sizeof fake);
-  CHECK(lm_player_open(&player, &sink, "mono22.mp3"));
+  CHECK(OPEN("mono22.mp3"));
   CHECK_INT(fake.rate, 22050); CHECK_INT(fake.channels, 1);
   CHECK_INT(play_through(&player, &fake), 41 * 576);
   lm_player_close(&player);
 
   /* Headerless VBR: the estimate is replaced by the decoded length at the end. */
   memset(&fake, 0, sizeof fake);
-  CHECK(lm_player_open(&player, &sink, "vbr-plain.mp3"));
+  CHECK(OPEN("vbr-plain.mp3"));
   uint32_t estimate = lm_player_duration(&player);
   play_through(&player, &fake);
   CHECK(lm_player_duration(&player) >= 1000 && lm_player_duration(&player) <= 1100);
@@ -103,7 +107,7 @@ int main(void) {
 
   /* Seek: positions restart at the target and never go backwards. */
   memset(&fake, 0, sizeof fake);
-  CHECK(lm_player_open(&player, &sink, "cbr-plain.mp3"));
+  CHECK(OPEN("cbr-plain.mp3"));
   lm_player_pump(&player, LM_SLOTS);
   advance(&fake, 4410);
   CHECK_INT(lm_player_position(&player), 100);
@@ -128,7 +132,7 @@ int main(void) {
 
   /* Xing TOC seek lands near the target on VBR. */
   memset(&fake, 0, sizeof fake);
-  CHECK(lm_player_open(&player, &sink, "vbr-xing.mp3"));
+  CHECK(OPEN("vbr-xing.mp3"));
   lm_player_seek(&player, 500);
   rest = play_through(&player, &fake);
   CHECK(rest >= (uint64_t)(0.40 * 44100) && rest <= (uint64_t)(0.56 * 44100));
@@ -138,7 +142,7 @@ int main(void) {
 
   /* Underrun: everything queued plays out before the next pump; counted once. */
   memset(&fake, 0, sizeof fake);
-  CHECK(lm_player_open(&player, &sink, "cbr-plain.mp3"));
+  CHECK(OPEN("cbr-plain.mp3"));
   lm_player_pump(&player, 1);
   advance(&fake, LM_SLOT_FRAMES);
   CHECK_INT(lm_player_queued(&player), 0);
@@ -154,7 +158,7 @@ int main(void) {
   /* Queued but not yet playing: nothing has been heard, so the position stays put. */
   memset(&fake, 0, sizeof fake);
   fake.stalled = 1;
-  CHECK(lm_player_open(&player, &sink, "cbr-info.mp3"));
+  CHECK(OPEN("cbr-info.mp3"));
   CHECK_INT(lm_player_pump(&player, 4), LM_PUMP_PLAYING);
   CHECK_INT(lm_player_position(&player), 0);
   fake.stalled = 0;
@@ -163,15 +167,43 @@ int main(void) {
   CHECK_INT(lm_player_position(&player), 100);
   lm_player_close(&player);
 
+  /* The smallest ring plays a whole file the same way. */
+  memset(&fake, 0, sizeof fake);
+  CHECK(lm_player_open(&player, &sink, ring_small, LM_RING_MIN_FRAMES, "cbr-info.mp3"));
+  CHECK_INT(play_through(&player, &fake), 40 * 1152);
+  CHECK_INT(lm_player_position(&player), 1044);
+  lm_player_close(&player);
+
+  /* Slots record where their audio starts in the ring, at rate 1, in queue order. */
+  memset(&fake, 0, sizeof fake);
+  CHECK(OPEN("cbr-info.mp3"));
+  lm_player_pump(&player, 3);
+  CHECK_INT(player.slot_start[0], 0);
+  CHECK_INT(player.slot_start[1], LM_SLOT_FRAMES);
+  CHECK_INT(player.slot_start[2], 2 * LM_SLOT_FRAMES);
+  CHECK_INT(player.slot_rate[1], LM_RATE_ONE);
+  CHECK(player.slot_seq[0] < player.slot_seq[1] && player.slot_seq[1] < player.slot_seq[2]);
+  /* The ring holds what was queued, sample for sample. */
+  int16_t first[LM_SLOT_FRAMES * 2];
+  lm_ring_copy(&player.ring, LM_SLOT_FRAMES, first, LM_SLOT_FRAMES);
+  CHECK(memcmp(first, fake.data[1], sizeof first) == 0);
+  /* A wavebuf handover that reads the previous slot's count against the next slot's start
+   * (a stale sample position) cannot move the normal-playback position backwards. */
+  advance(&fake, LM_SLOT_FRAMES + 2000);   /* slot 1 playing, 2000 frames in */
+  uint32_t at = lm_player_position(&player);
+  fake.played = 0;                          /* the DSP reports the slot's start for a moment */
+  CHECK_INT(lm_player_position(&player), at);
+  lm_player_close(&player);
+
   /* Failures: a missing file, no frames, and frames followed by unreadable bytes. */
   memset(&fake, 0, sizeof fake);
-  CHECK(!lm_player_open(&player, &sink, "no-such-file.mp3"));
+  CHECK(!OPEN("no-such-file.mp3"));
   CHECK_STR(player.message, "File not found");
   const char *tmp = "player-test.tmp";
   FILE *f = fopen(tmp, "wb");
   for (int i = 0; i < 70000; i++) fputc(0x11, f);
   fclose(f);
-  CHECK(!lm_player_open(&player, &sink, tmp));
+  CHECK(!OPEN(tmp));
   CHECK_STR(player.message, "MP3 frame sync not found");
   FILE *in = fopen("cbr-plain.mp3", "rb");
   uint8_t *audio = malloc(16718);
@@ -182,7 +214,7 @@ int main(void) {
   for (int i = 0; i < 80000; i++) fputc(0x11, f);
   fclose(f);
   free(audio);
-  CHECK(lm_player_open(&player, &sink, tmp));
+  CHECK(OPEN(tmp));
   LmPump state;
   int guard = 0;
   while ((state = lm_player_pump(&player, LM_SLOTS)) == LM_PUMP_PLAYING && guard++ < 100000) advance(&fake, 1024);

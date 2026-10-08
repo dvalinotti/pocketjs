@@ -95,6 +95,10 @@ static _Atomic unsigned underruns, decode_load;
 static _Atomic bool paused_flag;
 static _Atomic unsigned volume_percent = 100;
 static bool audio_ok;
+/* The player's PCM ring: LM_RING_FRAMES frames when the heap allows (scratching), else the
+ * LM_RING_MIN_FRAMES fallback (normal playback only). Freed by localmedia_stop. */
+static int16_t *ring_pcm;
+static uint32_t ring_frames;
 static Result audio_result;
 
 /* Library worker. */
@@ -226,7 +230,7 @@ static void audio_main(void *unused) {
       } else if (!audio_ok) {
         phase = FAILED;
         error = audio_result == (Result)MAKERESULT(RL_PERMANENT, RS_NOTFOUND, RM_DSP, RD_NOT_FOUND) ? ERR_DSP_FIRMWARE : ERR_AUDIO;
-      } else if (!lm_player_open(&player, &SINK, mail.path)) {
+      } else if (!lm_player_open(&player, &SINK, ring_pcm, ring_frames, mail.path)) {
         phase = FAILED;
         error = error_of(player.message);
       } else {
@@ -430,7 +434,13 @@ bool localmedia_start(void) {
   ids = lm_ids_create();
   library = lm_library_empty();
   art_pixels = malloc(LM_ART_PIXELS_BYTES);
-  if (!ids || !library || !art_pixels) return false;
+  ring_frames = LM_RING_FRAMES;
+  ring_pcm = malloc((size_t)LM_RING_FRAMES * 2 * sizeof *ring_pcm);
+  if (!ring_pcm) {
+    ring_frames = LM_RING_MIN_FRAMES;
+    ring_pcm = malloc((size_t)LM_RING_MIN_FRAMES * 2 * sizeof *ring_pcm);
+  }
+  if (!ids || !library || !art_pixels || !ring_pcm) return false;
   audio_result = ndspInit();
   audio_ok = R_SUCCEEDED(audio_result);
   if (audio_ok) {
@@ -472,6 +482,9 @@ void localmedia_stop(void) {
   ids = NULL;
   free(art_pixels);
   art_pixels = NULL;
+  free(ring_pcm);
+  ring_pcm = NULL;
+  ring_frames = 0;
 }
 
 void localmedia_forget_guest(void) {
