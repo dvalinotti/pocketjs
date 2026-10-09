@@ -5,7 +5,9 @@
 // tags, duration, whether it carries art and whether its file decodes. Time
 // passes only through advance(ms), so a run is a pure function of the
 // fixture and the calls. Every command updates the snapshot before it
-// returns (the contract's snapshot rule). Inject via bootWorld/bootBundle
+// returns (the contract's snapshot rule). While scratching, advance(ms) moves
+// the position by rate × ms, between 10 s behind the grab and the duration,
+// in any phase, and never ends the track. Inject via bootWorld/bootBundle
 // extraGlobals: { localmedia: host.ns }.
 
 import { LOCALMEDIA, type LocalMediaOps, type LocalStatus, type LocalTrack } from "../../contracts/spec/localmedia.ts";
@@ -70,9 +72,18 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
   let tracks: LocalTrack[] = [];
   let position = 0;
   let serial = 0;
+  /** While scratching: the rate, and the position at the grab (the history reaches 10 s behind it). */
+  let scratchRate = 0;
+  let grabbedAt = 0;
+  const SCRATCH_HISTORY_MS = 10_000;
+  const endScratch = () => {
+    status.scratching = false;
+    scratchRate = 0;
+  };
   const status: LocalStatus = {
     phase: "idle", trackId: -1, openSerial: 0, positionMs: 0, durationMs: 0,
     scanning: false, scanGeneration: 0, scanMs: 0, underruns: 0, error: "", decodeLoad: 0, artHandles: 0,
+    scratching: false,
   };
   /** The scan cache: published first by the first scan, then spent. */
   let cache: readonly SimLocalTrack[] | null = options.cached ?? null;
@@ -127,6 +138,7 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
       log.push(`open(${id})`);
       const track = tracks.find((t) => t.id === id);
       if (!track) return 0;
+      endScratch();
       serial++;
       Object.assign(status, { phase: "loading", trackId: id, openSerial: serial, durationMs: track.durationMs, error: "" });
       setPosition(0);
@@ -139,6 +151,7 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
     },
     seek(ms) {
       log.push(`seek(${ms})`);
+      endScratch();
       if (status.trackId < 0 || status.phase === "idle" || status.phase === "error") return;
       setPosition(Math.min(Math.max(0, ms), status.durationMs));
       if (status.phase === "ended") status.phase = "paused";
@@ -167,6 +180,21 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
       art.delete(handle);
       status.artHandles = art.size;
     },
+    scratchBegin() {
+      log.push("scratchBegin()");
+      if (status.phase !== "playing" && status.phase !== "paused") return;
+      status.scratching = true;
+      scratchRate = 0;
+      grabbedAt = position;
+    },
+    scratchRate(rate) {
+      log.push(`scratchRate(${rate})`);
+      if (status.scratching) scratchRate = rate;
+    },
+    scratchEnd() {
+      log.push("scratchEnd()");
+      endScratch();
+    },
   };
 
   return {
@@ -185,6 +213,11 @@ export function createSimLocalMedia(initial: readonly SimLocalTrack[], options: 
       if (scanLeft >= 0) {
         scanLeft -= ms;
         if (scanLeft <= 0) finishScan();
+      }
+      if (status.scratching) {
+        const low = Math.max(0, grabbedAt - SCRATCH_HISTORY_MS);
+        setPosition(Math.min(status.durationMs, Math.max(low, position + scratchRate * ms)));
+        return;
       }
       if (status.phase === "loading") {
         if (entryOf.get(status.trackId)?.corrupt) Object.assign(status, { phase: "error", error: "MP3 frame sync not found" });

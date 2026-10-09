@@ -169,3 +169,69 @@ test("an empty cache publishes nothing: the first scan stays in progress until t
   expect(media.status()).toMatchObject({ scanning: false, scanGeneration: 1 });
   expect(media.tracks().map((t) => t.file)).toEqual(["01 Intro.mp3"]);
 });
+
+test("scratching moves the position by rate × time either way, within 10 s behind the grab, paused too, and never ends", () => {
+  const { host, media } = setup();
+  media.scan();
+  media.open(0); // 1000 ms
+  host.advance(1);
+  host.advance(400);
+  expect(media.status()).toMatchObject({ phase: "playing", positionMs: 400, scratching: false });
+  media.scratchBegin();
+  expect(media.status().scratching).toBe(true);
+  host.advance(100); // rate 0: still
+  expect(media.status().positionMs).toBe(400);
+  media.scratchRate(-1);
+  host.advance(100);
+  expect(media.status().positionMs).toBe(300);
+  media.scratchRate(-4);
+  host.advance(1000); // clamped at 0 (the start is within 10 s)
+  expect(media.status().positionMs).toBe(0);
+  media.scratchRate(4);
+  host.advance(1000); // clamped at the duration, and not ended
+  expect(media.status()).toMatchObject({ positionMs: 1000, phase: "playing", scratching: true });
+  media.scratchEnd();
+  expect(media.status().scratching).toBe(false);
+  host.advance(1);
+  expect(media.status().phase).toBe("ended");
+  expect(host.log.filter((entry) => entry.startsWith("scratch"))).toEqual(["scratchBegin()", "scratchRate(-1)", "scratchRate(-4)", "scratchRate(4)", "scratchEnd()"]);
+});
+
+test("a grab is ignored unless playing or paused; paused scratching moves and stays paused; open and seek end it", () => {
+  const { host, media } = setup();
+  media.scan();
+  media.scratchBegin(); // idle
+  expect(media.status().scratching).toBe(false);
+  media.open(1); // 2000 ms
+  media.scratchBegin(); // loading
+  expect(media.status().scratching).toBe(false);
+  host.advance(1);
+  media.pause(true);
+  media.scratchBegin();
+  media.scratchRate(1);
+  host.advance(250);
+  expect(media.status()).toMatchObject({ phase: "paused", scratching: true, positionMs: 250 });
+  media.scratchEnd();
+  host.advance(250);
+  expect(media.status()).toMatchObject({ phase: "paused", positionMs: 250 });
+  media.pause(false);
+  media.scratchBegin();
+  media.seek(1000);
+  expect(media.status().scratching).toBe(false);
+  media.scratchBegin();
+  media.open(0);
+  expect(media.status().scratching).toBe(false);
+});
+
+test("a long reverse scratch holds 10 s behind the grab", () => {
+  const host = createSimLocalMedia([{ file: "long.mp3", durationMs: 60_000 }]);
+  const media = localMedia(host.ns);
+  media.scan();
+  media.open(0);
+  host.advance(1);
+  host.advance(30_000);
+  media.scratchBegin();
+  media.scratchRate(-4);
+  host.advance(5_000);
+  expect(media.status().positionMs).toBe(20_000);
+});
