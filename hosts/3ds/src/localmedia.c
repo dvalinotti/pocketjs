@@ -282,6 +282,8 @@ static void audio_main(void *unused) {
       window_decode += player.decode_ticks - before;
       if (state == LM_PUMP_ERROR) phase = FAILED;
       else if (state == LM_PUMP_ENDED) phase = ENDED;
+      error = phase == FAILED ? error_of(player.message) : ERR_NONE;
+      publish(generation, phase, error);
     }
     if (applied_scratch) lm_player_scratch_rate(&player, atomic_load(&scratch_rate_fp));
     bool paused = atomic_load(&paused_flag);

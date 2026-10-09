@@ -107,7 +107,9 @@ void ndspChnSetInterp(int id, int type) { (void)id; (void)type; }
 void ndspChnSetRate(int id, float rate) { (void)id; (void)rate; }
 void ndspChnSetFormat(int id, u16 format) { (void)id; (void)format; }
 void ndspChnSetMix(int id, float mix[12]) { (void)id; (void)mix; }
-void ndspChnSetPaused(int id, bool paused) { (void)id; (void)paused; }
+static _Atomic bool channel_paused;
+void ndspChnSetPaused(int id, bool paused) { (void)id; atomic_store(&channel_paused, paused); }
+bool fake_channel_paused(void) { return atomic_load(&channel_paused); }
 void ndspChnWaveBufAdd(int id, ndspWaveBuf *buf) {
   (void)id;
   pthread_mutex_lock(&ndsp_lock);

@@ -194,13 +194,21 @@ int main(void) {
   CHECK(fake_queued() >= 4);
   /* Paused, the platter still plays its slots, and the snapshot stays paused. */
   localmedia_paused(true);
+  WAIT_UNTIL(fake_channel_paused(), 2000);
+  CHECK(fake_channel_paused());
   localmedia_scratch_begin();
   CHECK(strstr(read_status(), "\"scratching\":true") != NULL);
   CHECK(phase_is("paused"));
-  WAIT_UNTIL(fake_queued() == 3, 2000);
+  WAIT_UNTIL(fake_queued() == 3 && !fake_channel_paused(), 2000);
   CHECK_INT(fake_queued(), 3);
+  CHECK(!fake_channel_paused());
   localmedia_scratch_end();
+  WAIT_UNTIL(fake_channel_paused(), 2000);
+  CHECK(fake_channel_paused());
+  CHECK(phase_is("paused"));
   localmedia_paused(false);
+  WAIT_UNTIL(!fake_channel_paused(), 2000);
+  CHECK(!fake_channel_paused());
   /* An open ends scratching; so does a seek. */
   localmedia_scratch_begin();
   CHECK(localmedia_open(a) > 0);
@@ -214,6 +222,23 @@ int main(void) {
   WAIT_UNTIL((fake_drain(1u << 30), phase_is("ended")), 3000);
   CHECK(phase_is("ended"));
   localmedia_scratch_begin();
+  CHECK(strstr(read_status(), "\"scratching\":false") != NULL);
+  /* A lift at the end of the file ends the track: the platter ran the head to the end at +4. */
+  CHECK(localmedia_open(a) > 0);
+  WAIT_UNTIL(phase_is("playing") && fake_queued() >= 4, 2000);
+  localmedia_scratch_begin();
+  localmedia_scratch_rate(4.0);
+  WAIT_UNTIL(fake_queued() == 3, 2000);
+  for (int i = 0; i < 400; i++) { fake_drain(1u << 30); sleep_ms(5); }
+  /* With the audio thread parked and every slot played, the lift finds nothing left to hear. */
+  fake_hold(true);
+  sleep_ms(30);
+  fake_drain(1u << 30);
+  CHECK_INT(fake_queued(), 0);
+  localmedia_scratch_end();
+  fake_hold(false);
+  WAIT_UNTIL(phase_is("ended"), 2000);
+  CHECK(phase_is("ended"));
   CHECK(strstr(read_status(), "\"scratching\":false") != NULL);
   /* Out of memory during a rescan (its big allocations fail, small ones still succeed): the
    * list stays, not an empty one, and scanning ends. */

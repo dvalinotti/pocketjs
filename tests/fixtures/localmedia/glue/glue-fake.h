@@ -12,6 +12,8 @@ uint32_t fake_drain(uint32_t frames);
 /* Wavebufs queued and not yet played; wavebufs ever queued. */
 int fake_queued(void);
 unsigned fake_adds(void);
+/* The last value the player gave ndspChnSetPaused. */
+bool fake_channel_paused(void);
 /* While held, an open waits inside its configure (at ndspChnReset). */
 void fake_hold_configure(bool held);
 /* Configures started so far; wavebufs queued between the last two. */
