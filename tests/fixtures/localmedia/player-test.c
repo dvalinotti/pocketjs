@@ -181,7 +181,8 @@ int main(void) {
   CHECK_INT(player.slot_start[0], 0);
   CHECK_INT(player.slot_start[1], LM_SLOT_FRAMES);
   CHECK_INT(player.slot_start[2], 2 * LM_SLOT_FRAMES);
-  CHECK_INT(player.slot_rate[1], LM_RATE_ONE);
+  CHECK_INT(player.slot_rate_from[1], LM_RATE_ONE);
+  CHECK_INT(player.slot_rate_to[1], LM_RATE_ONE);
   CHECK(player.slot_seq[0] < player.slot_seq[1] && player.slot_seq[1] < player.slot_seq[2]);
   /* The ring holds what was queued, sample for sample. */
   int16_t first[LM_SLOT_FRAMES * 2];

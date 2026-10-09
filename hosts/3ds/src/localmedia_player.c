@@ -155,9 +155,11 @@ static uint32_t decoded_ms(const LmPlayer *p) {
   return ms_at(p, (int64_t)p->ring.written);
 }
 
-static void queue_slot(LmPlayer *p, int slot, int frames, int64_t start, int32_t rate) {
+static void queue_slot(LmPlayer *p, int slot, int frames, int64_t start, int32_t rate_from, int32_t rate_to) {
   p->slot_start[slot] = start;
-  p->slot_rate[slot] = rate;
+  p->slot_rate_from[slot] = rate_from;
+  p->slot_rate_to[slot] = rate_to;
+  p->slot_frames[slot] = frames;
   p->slot_seq[slot] = ++p->next_seq;
   p->sink->queue(p->sink->ctx, slot, frames);
   p->queued_once = 1;
@@ -171,14 +173,16 @@ static int fill_slot(LmPlayer *p, int slot) {
   int frames = held < LM_SLOT_FRAMES ? (int)held : LM_SLOT_FRAMES;
   if (frames == 0) return 0;
   lm_ring_copy(&p->ring, p->head, p->sink->slot_data(p->sink->ctx, slot), frames);
-  queue_slot(p, slot, frames, (int64_t)p->head, LM_RATE_ONE);
+  queue_slot(p, slot, frames, (int64_t)p->head, LM_RATE_ONE, LM_RATE_ONE);
   p->head += (uint64_t)frames;
   return frames;
 }
 
-/* The ring frame the slot's `played`-th output frame read. */
+/* The ring frame the slot's `played`-th output frame read: the slot's rate ramps linearly from
+ * its first value to its last, so the offset sums the per-frame steps the resampler took. */
 static int64_t slot_frame(const LmPlayer *p, int slot, uint32_t played) {
-  return p->slot_start[slot] + (int64_t)played * p->slot_rate[slot] / LM_RATE_ONE;
+  int64_t from = p->slot_rate_from[slot], to = p->slot_rate_to[slot], n = p->slot_frames[slot], k = played;
+  return p->slot_start[slot] + (from * k + (to - from) * k * (k - 1) / (2 * n)) / LM_RATE_ONE;
 }
 
 /* A ring frame clamped to the frames held, or the end just past the newest. */
@@ -209,14 +213,14 @@ static void fill_scratch_slot(LmPlayer *p, int slot) {
     uint64_t at = p->scratch_head > 0 ? (uint64_t)(p->scratch_head / LM_POS_ONE) : 0;
     decode_ahead(p, at, (uint64_t)(2 * LM_SCRATCH_FRAMES) * (uint64_t)fastest / LM_RATE_ONE + 2);
   }
-  /* The slot starts where its first frame reads: the head clamped as the resampler clamps it. */
+  /* The slot starts where its first frame reads: the head clamped as the resampler clamps it. The
+   * head itself stays unclamped, so a platter held outside the held frames stays silent. */
   LmRingPos lo = (LmRingPos)lm_ring_oldest(&p->ring) * LM_POS_ONE;
   LmRingPos hi = p->ring.written > 0 ? (LmRingPos)(p->ring.written - 1) * LM_POS_ONE : 0;
-  if (p->scratch_head < lo) p->scratch_head = lo;
-  if (p->scratch_head > hi) p->scratch_head = hi;
-  int64_t start = p->scratch_head / LM_POS_ONE;
+  LmRingPos clamped = p->scratch_head < lo ? lo : p->scratch_head > hi ? hi : p->scratch_head;
+  int64_t start = clamped / LM_POS_ONE;
   p->scratch_head = lm_ring_resample(&p->ring, p->scratch_head, from, to, p->sink->slot_data(p->sink->ctx, slot), LM_SCRATCH_FRAMES);
-  queue_slot(p, slot, LM_SCRATCH_FRAMES, start, (int32_t)(((int64_t)from + to) / 2));
+  queue_slot(p, slot, LM_SCRATCH_FRAMES, start, from, to);
   p->scratch_applied = to;
 }
 

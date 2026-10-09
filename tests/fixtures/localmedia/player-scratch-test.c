@@ -129,7 +129,8 @@ int main(void) {
   lm_player_pump(&player, 1); /* steady -2 */
   int s = newest_slot();
   CHECK_INT(player.slot_start[s], 8820 - 1023);
-  CHECK_INT(player.slot_rate[s], -2 * LM_RATE_ONE);
+  CHECK_INT(player.slot_rate_from[s], -2 * LM_RATE_ONE);
+  CHECK_INT(player.slot_rate_to[s], -2 * LM_RATE_ONE);
   int same = 1;
   for (int i = 0; i < LM_SCRATCH_FRAMES; i++) {
     same &= fake.data[s][i * 2] == ref[(7797 - 2 * i) * 2];
@@ -150,7 +151,8 @@ int main(void) {
   lm_player_pump(&player, 1);
   s = newest_slot();
   CHECK_INT(player.slot_start[s], 6773);
-  CHECK_INT(player.slot_rate[s], LM_RATE_ONE);
+  CHECK_INT(player.slot_rate_from[s], LM_RATE_ONE);
+  CHECK_INT(player.slot_rate_to[s], LM_RATE_ONE);
   CHECK_INT(fake.frames[s], LM_SLOT_FRAMES);
   CHECK(memcmp(fake.data[s], ref + 6773 * 2, (size_t)LM_SLOT_FRAMES * 2 * sizeof *ref) == 0);
 
@@ -201,9 +203,9 @@ int main(void) {
   lm_player_pump(&player, LM_SLOTS);
   s = newest_slot();
   CHECK_INT(player.slot_start[s], 0);
-  /* Its first output frame reads frame 0 itself; every later one is below the ring: silence. */
+  /* A platter held at the start of the ring is silent from its first output frame. */
   silent = 1;
-  for (int i = 2; i < LM_SCRATCH_FRAMES * 2; i++) silent &= fake.data[s][i] == 0;
+  for (int i = 0; i < LM_SCRATCH_FRAMES * 2; i++) silent &= fake.data[s][i] == 0;
   CHECK(silent);
   CHECK_INT(lm_player_position(&player), 0);
 
@@ -214,6 +216,75 @@ int main(void) {
   CHECK_INT(fake.frames[newest_slot()], LM_SLOT_FRAMES);
   CHECK_INT(lm_player_position(&player), 500);
   lm_player_close(&player);
+
+  /* Lifting the finger inside a ramp slot resumes at the frame the ramp had reached: the slot
+   * ramps 0 -> -2x over 1024 frames, and 512 have played. */
+  memset(&fake, 0, sizeof fake);
+  CHECK(OPEN("cbr-info.mp3"));
+  lm_player_pump(&player, 4);
+  advance(&fake, 8820);
+  CHECK(lm_player_scratch_begin(&player));
+  lm_player_pump(&player, LM_SLOTS);
+  advance(&fake, 3 * LM_SCRATCH_FRAMES);
+  lm_player_scratch_rate(&player, -2 * LM_RATE_ONE);
+  lm_player_pump(&player, 1);
+  s = newest_slot();
+  CHECK_INT(player.slot_rate_from[s], 0);
+  CHECK_INT(player.slot_rate_to[s], -2 * LM_RATE_ONE);
+  advance(&fake, 512);
+  {
+    /* The offset after k frames is the sum of the per-frame steps -128 * i (i < k) in 16.16. */
+    const int64_t k = 512, n = LM_SCRATCH_FRAMES, from = 0, to = -2 * LM_RATE_ONE;
+    const int64_t reached = 8820 + (from * k + (to - from) * k * (k - 1) / (2 * n)) / LM_RATE_ONE;
+    CHECK_INT(reached, 8820 - 255);
+    lm_player_scratch_end(&player);
+    lm_player_pump(&player, 1);
+    s = newest_slot();
+    CHECK_INT(player.slot_start[s], reached);
+    CHECK(memcmp(fake.data[s], ref + reached * 2, (size_t)LM_SLOT_FRAMES * 2 * sizeof *ref) == 0);
+  }
+  lm_player_close(&player);
+
+  /* A ring that has wrapped: scratch forward until the oldest frames are overwritten, then back
+   * until the head holds at the oldest frame still held. */
+  {
+    const char *tmp = "player-scratch-long.tmp";
+    FILE *in = fopen("cbr-plain.mp3", "rb");
+    CHECK(in != NULL);
+    static uint8_t song[20000];
+    size_t song_length = fread(song, 1, sizeof song, in);
+    fclose(in);
+    FILE *out = fopen(tmp, "wb");
+    for (int i = 0; i < 20; i++) fwrite(song, 1, song_length, out);
+    fclose(out);
+    memset(&fake, 0, sizeof fake);
+    CHECK(OPEN(tmp));
+    CHECK(lm_player_scratch_begin(&player));
+    lm_player_scratch_rate(&player, LM_SCRATCH_MAX_RATE);
+    for (int i = 0; i < 400 && player.ring.written <= LM_RING_FRAMES + LM_SCRATCH_FRAMES * 8; i++) {
+      lm_player_pump(&player, LM_SLOTS);
+      advance(&fake, LM_SCRATCH_FRAMES);
+    }
+    CHECK(player.ring.written > LM_RING_FRAMES + LM_SCRATCH_FRAMES * 8);
+    CHECK(lm_ring_oldest(&player.ring) > 0);
+    lm_player_scratch_rate(&player, -LM_SCRATCH_MAX_RATE);
+    for (int i = 0; i < 400; i++) { lm_player_pump(&player, LM_SLOTS); advance(&fake, LM_SCRATCH_FRAMES); }
+    lm_player_pump(&player, LM_SLOTS);
+    int64_t oldest = (int64_t)lm_ring_oldest(&player.ring);
+    for (int q = 0; q < LM_SLOTS; q++)
+      if (!fake_free(&fake, q)) CHECK(player.slot_start[q] >= oldest);
+    s = newest_slot();
+    CHECK_INT(player.slot_start[s], oldest);
+    silent = 1;
+    for (int i = 0; i < LM_SCRATCH_FRAMES * 2; i++) silent &= fake.data[s][i] == 0;
+    CHECK(silent);
+    CHECK_INT(lm_player_position(&player), 1000 * oldest / 44100);
+    lm_player_scratch_end(&player);
+    lm_player_pump(&player, 1);
+    CHECK(player.slot_start[newest_slot()] >= oldest);
+    lm_player_close(&player);
+    remove(tmp);
+  }
 
   CHECK_DONE("localmedia player scratch");
 }

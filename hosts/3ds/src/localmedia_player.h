@@ -65,7 +65,9 @@ typedef struct {
   LmRing ring;               /* frames decoded since base_ms; ring.written counts them */
   uint64_t head;             /* the ring frame the next normal slot starts at */
   int64_t slot_start[LM_SLOTS]; /* ring frame the slot's first output frame reads */
-  int32_t slot_rate[LM_SLOTS];  /* the slot's mean rate, 16.16 ring frames per output frame */
+  int32_t slot_rate_from[LM_SLOTS]; /* the rate the slot starts at, 16.16 ring frames per output frame */
+  int32_t slot_rate_to[LM_SLOTS];   /* the rate it ends at; the rate ramps linearly across the slot */
+  int slot_frames[LM_SLOTS];        /* the slot's output frame count */
   uint32_t slot_seq[LM_SLOTS];  /* queue order: larger was queued later */
   uint32_t next_seq;
   int scratching;            /* the guest holds the platter: slots resample the ring */
