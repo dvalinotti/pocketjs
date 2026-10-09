@@ -5,7 +5,6 @@
  *   library — below the UI: folder scan, tags, art decode.
  * Commands and results cross threads through atomics only (as media.c). */
 #include "localmedia.h"
-#include "localmedia_alloc.h"
 #include "localmedia_art.h"
 #include "localmedia_cache.h"
 #include "localmedia_ids.h"
@@ -19,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include "localmedia_alloc.h"
 
 #ifndef LOCALMEDIA_ROOT
 #define LOCALMEDIA_ROOT "sdmc:/music/"
