@@ -23,6 +23,11 @@ export interface LocalMedia {
   status(): LocalStatus;
   artwork(id: number): LocalArtwork;
   releaseArtwork(handle: number): void;
+  /** Hands the platter to the guest: queued audio drops and output follows scratchRate. */
+  scratchBegin(): void;
+  /** Signed multiple of normal speed, clamped to ±LOCALMEDIA.maxScratchRate; non-finite reads as 0. */
+  scratchRate(rate: number): void;
+  scratchEnd(): void;
 }
 
 function trackId(value: number): number {
@@ -63,5 +68,8 @@ export function localMedia(ops = (globalThis as unknown as { localmedia?: LocalM
     releaseArtwork(handle) {
       if (handle > 0) ops.releaseArtwork(handle);
     },
+    scratchBegin: () => ops.scratchBegin(),
+    scratchRate: (rate) => ops.scratchRate(Number.isFinite(rate) ? Math.min(LOCALMEDIA.maxScratchRate, Math.max(-LOCALMEDIA.maxScratchRate, rate)) : 0),
+    scratchEnd: () => ops.scratchEnd(),
   };
 }

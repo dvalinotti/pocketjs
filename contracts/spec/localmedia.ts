@@ -15,6 +15,16 @@
  * returned, so a stale snapshot is ignored even when it names the same
  * track (repeat one).
  *
+ * Scratching: scratchBegin() hands the platter to the guest. Queued audio is
+ * dropped, the head latches at the frame being heard, and output follows
+ * scratchRate(rate) (1 forward at normal speed, -1 reverse, 0 still and
+ * silent), even while paused. The host keeps about 10 s of decoded audio
+ * behind the playhead; a scratch past it holds at the oldest frame.
+ * scratchEnd() resumes normal playback, or the pause, from the frame being
+ * heard. scratchBegin() is ignored unless the phase is playing or paused;
+ * open() and seek() end scratching. Every scratch op updates `scratching` in
+ * the snapshot before it returns.
+ *
  * Artwork: artwork(id) never blocks. The first call for an id starts a decode
  * off the UI thread and returns -1 (pending); a later call returns the texture
  * handle once the decode finished, or 0 when the track has no art or it failed
@@ -22,12 +32,14 @@
  * earlier one. A handle belongs to the guest until releaseArtwork(handle); a
  * call for the same id after its handle was handed out starts a new request. */
 export const LOCALMEDIA = Object.freeze({
-  version: 2,
+  version: 3,
   /** Scanned non-recursively for *.mp3 (extension case-insensitive). */
   root: "sdmc:/music/",
   maxTracks: 2048,
   /** Edge of the square artwork texture: the picture is centre-cropped to a square, then scaled. */
   artMax: 128,
+  /** The fastest scratch either way, as a multiple of normal speed. */
+  maxScratchRate: 4,
 });
 
 export type LocalPhase = "idle" | "loading" | "playing" | "paused" | "ended" | "error";
@@ -58,6 +70,7 @@ export interface LocalStatus {
   trackId: number;
   /** Serial of the open this snapshot describes; 0 before the first. */
   openSerial: number;
+  /** Moves forward in normal playback; may decrease while `scratching`. */
   positionMs: number;
   durationMs: number;
   /** A scan is running; independent of the playback phase. */
@@ -73,6 +86,8 @@ export interface LocalStatus {
   decodeLoad: number;
   /** Artwork handles issued and not yet released. */
   artHandles: number;
+  /** The guest holds the platter (scratchBegin() accepted, no scratchEnd(), open() or seek() since). */
+  scratching: boolean;
 }
 
 export interface LocalMediaOps {
@@ -94,6 +109,12 @@ export interface LocalMediaOps {
    * has none, decoding failed, or the id is not in the last scan. Never blocks (see Artwork above). */
   artwork(id: number): number;
   releaseArtwork(handle: number): void;
+  /** Hands the platter to the guest (see Scratching above). */
+  scratchBegin(): void;
+  /** Signed multiple of normal speed while scratching; the host clamps to ±maxScratchRate. */
+  scratchRate(rate: number): void;
+  /** Resumes normal playback, or the pause, from the frame being heard. */
+  scratchEnd(): void;
 }
 
 const isInt = (value: unknown, min = 0): value is number => Number.isInteger(value) && (value as number) >= min;
@@ -110,5 +131,5 @@ export function validLocalStatus(value: unknown): value is LocalStatus {
     && isInt(value.trackId, -1) && isInt(value.openSerial) && isInt(value.positionMs) && isInt(value.durationMs)
     && typeof value.scanning === "boolean" && isInt(value.scanGeneration) && isInt(value.scanMs)
     && isInt(value.underruns) && typeof value.error === "string"
-    && isInt(value.decodeLoad) && isInt(value.artHandles);
+    && isInt(value.decodeLoad) && isInt(value.artHandles) && typeof value.scratching === "boolean";
 }

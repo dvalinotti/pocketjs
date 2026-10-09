@@ -4,7 +4,7 @@ import { POCKET_CAPABILITIES } from "../contracts/spec/platforms.ts";
 import { localMedia } from "../framework/src/localmedia.ts";
 import { resolve3dsBuildPlan } from "../tools/3ds-profile.ts";
 
-const STATUS: LocalStatus = { phase: "playing", trackId: 1, openSerial: 4, positionMs: 10, durationMs: 100, scanning: false, scanGeneration: 1, scanMs: 900, underruns: 0, error: "", decodeLoad: 12, artHandles: 1 };
+const STATUS: LocalStatus = { phase: "playing", trackId: 1, openSerial: 4, positionMs: 10, durationMs: 100, scanning: false, scanGeneration: 1, scanMs: 900, underruns: 0, error: "", decodeLoad: 12, artHandles: 1, scratching: false };
 
 function recorder(over: Partial<LocalMediaOps> = {}) {
   const calls: string[] = [];
@@ -18,6 +18,9 @@ function recorder(over: Partial<LocalMediaOps> = {}) {
     status: () => JSON.stringify(STATUS),
     artwork: (id) => (calls.push(`artwork ${id}`), 3),
     releaseArtwork: (h) => void calls.push(`release ${h}`),
+    scratchBegin: () => void calls.push("scratchBegin"),
+    scratchRate: (rate) => void calls.push(`scratchRate ${rate}`),
+    scratchEnd: () => void calls.push("scratchEnd"),
     ...over,
   };
   return { calls, ops };
@@ -38,6 +41,16 @@ test("volume and seek are clamped before they cross; ids must be track ids", () 
   expect(() => media.open(-1)).toThrow("Invalid track id");
   expect(() => media.open(1.5)).toThrow("Invalid track id");
   expect(() => media.artwork(-2)).toThrow("Invalid track id");
+});
+
+test("scratch ops cross; the rate is clamped to ±maxScratchRate and a non-finite rate is 0", () => {
+  const { calls, ops } = recorder();
+  const media = localMedia(ops);
+  media.scratchBegin();
+  media.scratchRate(-1.5); media.scratchRate(9); media.scratchRate(-9); media.scratchRate(NaN); media.scratchRate(Infinity);
+  media.scratchEnd();
+  expect(calls).toEqual(["scratchBegin", "scratchRate -1.5", "scratchRate 4", "scratchRate -4", "scratchRate 0", "scratchRate 0", "scratchEnd"]);
+  expect(localMedia(ops).status().scratching).toBe(false);
 });
 
 test("artwork -1 reads as pending; handles pass through", () => {
@@ -72,7 +85,8 @@ test("status and tracks are parsed and validated", () => {
   expect(validLocalStatus({ ...STATUS, artHandles: -1 })).toBe(false);
   expect(validLocalStatus({ ...STATUS, scanMs: undefined })).toBe(false);
   expect(validLocalStatus({ ...STATUS, scanMs: -1 })).toBe(false);
-  expect(LOCALMEDIA).toEqual({ version: 2, root: "sdmc:/music/", maxTracks: 2048, artMax: 128 });
+  expect(validLocalStatus({ ...STATUS, scratching: undefined })).toBe(false);
+  expect(LOCALMEDIA).toEqual({ version: 3, root: "sdmc:/music/", maxTracks: 2048, artMax: 128, maxScratchRate: 4 });
 });
 
 const probeManifest = (requires: string[]) => ({
