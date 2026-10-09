@@ -5,6 +5,7 @@
  *   library — below the UI: folder scan, tags, art decode.
  * Commands and results cross threads through atomics only (as media.c). */
 #include "localmedia.h"
+#include "localmedia_alloc.h"
 #include "localmedia_art.h"
 #include "localmedia_cache.h"
 #include "localmedia_ids.h"
@@ -459,6 +460,10 @@ static unsigned visible_phase(unsigned base) {
 
 bool localmedia_start(void) {
   launch_scanned = false;
+  /* A stop mid-scan leaves these set; a later start begins with the library worker idle. */
+  atomic_store(&scan_stop, 0);
+  atomic_store(&scanning, false);
+  atomic_store(&scan_requested, false);
   ids = lm_ids_create();
   library = lm_library_empty();
   art_pixels = malloc(LM_ART_PIXELS_BYTES);

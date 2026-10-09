@@ -182,6 +182,7 @@ static int fill_slot(LmPlayer *p, int slot) {
  * its first value to its last, so the offset sums the per-frame steps the resampler took. */
 static int64_t slot_frame(const LmPlayer *p, int slot, uint32_t played) {
   int64_t from = p->slot_rate_from[slot], to = p->slot_rate_to[slot], n = p->slot_frames[slot], k = played;
+  if (n <= 0) return p->slot_start[slot];
   return p->slot_start[slot] + (from * k + (to - from) * k * (k - 1) / (2 * n)) / LM_RATE_ONE;
 }
 

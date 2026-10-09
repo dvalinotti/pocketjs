@@ -248,13 +248,16 @@ int main(void) {
   /* A ring that has wrapped: scratch forward until the oldest frames are overwritten, then back
    * until the head holds at the oldest frame still held. */
   {
-    const char *tmp = "player-scratch-long.tmp";
+    const char *dir = getenv("TMPDIR");
+    char tmp[512];
+    snprintf(tmp, sizeof tmp, "%s/player-scratch-long.tmp", dir && *dir ? dir : "/tmp");
     FILE *in = fopen("cbr-plain.mp3", "rb");
     CHECK(in != NULL);
     static uint8_t song[20000];
     size_t song_length = fread(song, 1, sizeof song, in);
     fclose(in);
     FILE *out = fopen(tmp, "wb");
+    CHECK(out != NULL);
     for (int i = 0; i < 20; i++) fwrite(song, 1, song_length, out);
     fclose(out);
     memset(&fake, 0, sizeof fake);

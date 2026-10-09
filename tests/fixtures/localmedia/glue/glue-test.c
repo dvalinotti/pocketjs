@@ -260,5 +260,25 @@ int main(void) {
   sleep_ms(5);
   localmedia_stop();
   CHECK_INT(fake_live_textures(), 0);
+
+  /* A heap too small for the 2 MiB ring (allocations of 1 MiB and more fail) starts with the
+   * 32 KiB ring: normal playback works, and a grab is ignored, since scratching needs the big one. */
+  atomic_store(&lm_test_alloc_fail_bytes, 1u << 20);
+  CHECK(localmedia_start());
+  CHECK(localmedia_scan());
+  WAIT_UNTIL(strstr(read_status(), "\"scanning\":false") != NULL && id_of("b.mp3") >= 0, 5000);
+  int small = id_of("b.mp3");
+  CHECK(small >= 0);
+  CHECK(localmedia_open(small) > 0);
+  WAIT_UNTIL(phase_is("playing") && fake_queued() >= 4, 2000);
+  CHECK(phase_is("playing"));
+  CHECK(fake_queued() >= 4);
+  localmedia_scratch_begin();
+  sleep_ms(30);
+  CHECK(strstr(read_status(), "\"scratching\":false") != NULL);
+  CHECK(phase_is("playing"));
+  atomic_store(&lm_test_alloc_fail_bytes, 0);
+  localmedia_stop();
+  CHECK_INT(fake_live_textures(), 0);
   CHECK_DONE("localmedia glue");
 }

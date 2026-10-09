@@ -120,7 +120,7 @@ int main(void) {
   advance(&fake, 4410);
   CHECK_INT(lm_player_position(&player), 700);
   uint64_t rest = play_through(&player, &fake);
-  /* About 0.44 s follow 0.6 s; up to two frames after a seek play no audio (bit reservoir). */
+  /* About 0.44 s follow 0.6 s; up to two frames after a seek play as silence (bit reservoir) but still count. */
   CHECK(rest >= (uint64_t)(0.38 * 44100) && rest <= (uint64_t)(0.46 * 44100));
   CHECK(lm_player_position(&player) >= 1030 && lm_player_position(&player) <= 1050);
   /* Seeking past the end ends the track; a seek back plays again. */
