@@ -32,6 +32,8 @@
 #define CHANNEL 0
 #define PREFILL_SLOTS 4
 #define WAKE_NS 10000000LL
+/* While scratching, slots are 23 ms long: the audio thread waits at most 5 ms. */
+#define SCRATCH_WAKE_NS 5000000LL
 #define MAX_ART_HANDLES 32
 /* Folder plus name: SD card names reach 255 UTF-16 units, up to 765 UTF-8 bytes. */
 #define PATH_BYTES 1024
@@ -94,6 +96,8 @@ static _Atomic unsigned work_phase, work_position, work_duration, work_error;
 static _Atomic unsigned underruns, decode_load;
 static _Atomic bool paused_flag;
 static _Atomic unsigned volume_percent = 100;
+static _Atomic bool scratch_flag;       /* the guest holds the platter (UI thread writes) */
+static _Atomic int32_t scratch_rate_fp; /* its rate, 16.16, clamped (UI thread writes) */
 static bool audio_ok;
 /* The player's PCM ring: LM_RING_FRAMES frames when the heap allows (scratching), else the
  * LM_RING_MIN_FRAMES fallback (normal playback only). Freed by localmedia_stop. */
@@ -210,6 +214,7 @@ static void audio_main(void *unused) {
   (void)unused;
   unsigned generation = 0, phase = IDLE, error = ERR_NONE, handled_open = 0, handled_seek = 0;
   bool applied_paused = false;
+  bool applied_scratch = false;
   unsigned applied_volume = 100;
   uint64_t window_start = svcGetSystemTick(), window_decode = 0;
   while (atomic_load(&running)) {
@@ -221,6 +226,7 @@ static void audio_main(void *unused) {
       handled_open = mail.generation;
       generation = mail.generation;
       handled = true;
+      applied_scratch = false;
       close_player();
       open_duration = mail.ms;
       phase = IDLE;
@@ -243,6 +249,7 @@ static void audio_main(void *unused) {
       handled_seek = mail.generation;
       generation = mail.generation;
       handled = true;
+      applied_scratch = false;
       if (player_open) { lm_player_seek(&player, mail.ms); restart = true; }
     }
     /* A newer command arrived while this one opened or seeked: leave the prefill to it. */
@@ -258,20 +265,39 @@ static void audio_main(void *unused) {
     /* Every handled command publishes, so its snapshot never outlives it (a failed open
      * superseded by a seek still reaches "error"). */
     if (handled) publish(generation, phase, error);
+    /* The platter follows the guest's flag. While held, the channel plays whatever the pause flag
+     * says; the lift restores the pause and refills normal slots from the frame being heard. */
+    bool scratch = atomic_load(&scratch_flag) && player_open && phase == PLAYING;
+    if (scratch && !applied_scratch && lm_player_scratch_begin(&player)) {
+      applied_scratch = true;
+      applied_paused = false;
+      ndspChnSetPaused(CHANNEL, false);
+    } else if (!scratch && applied_scratch) {
+      applied_scratch = false;
+      lm_player_scratch_end(&player);
+      applied_paused = atomic_load(&paused_flag);
+      ndspChnSetPaused(CHANNEL, applied_paused);
+      uint64_t before = player.decode_ticks;
+      LmPump state = lm_player_pump(&player, PREFILL_SLOTS);
+      window_decode += player.decode_ticks - before;
+      if (state == LM_PUMP_ERROR) phase = FAILED;
+      else if (state == LM_PUMP_ENDED) phase = ENDED;
+    }
+    if (applied_scratch) lm_player_scratch_rate(&player, atomic_load(&scratch_rate_fp));
     bool paused = atomic_load(&paused_flag);
-    if (paused != applied_paused) { ndspChnSetPaused(CHANNEL, paused); applied_paused = paused; }
+    if (!applied_scratch && paused != applied_paused) { ndspChnSetPaused(CHANNEL, paused); applied_paused = paused; }
     unsigned volume = atomic_load(&volume_percent);
     if (volume != applied_volume && audio_ok) { apply_mix(); applied_volume = volume; }
     bool hurry = false;
     if (player_open && phase == PLAYING) {
       uint64_t before = player.decode_ticks;
-      LmPump state = lm_player_pump(&player, 1);
+      LmPump state = lm_player_pump(&player, applied_scratch ? LM_SCRATCH_QUEUE : 1);
       window_decode += player.decode_ticks - before;
       if (state == LM_PUMP_ENDED) phase = ENDED;
       else if (state == LM_PUMP_ERROR) phase = FAILED;
       /* Hurry only while there is still audio to decode: at the end of the file the last
        * slots drain on their own, and spinning here would starve the UI. */
-      hurry = phase == PLAYING && !paused && !player.eof && !player.error && lm_player_queued(&player) < PREFILL_SLOTS;
+      hurry = !applied_scratch && phase == PLAYING && !paused && !player.eof && !player.error && lm_player_queued(&player) < PREFILL_SLOTS;
       error = phase == FAILED ? error_of(player.message) : ERR_NONE;
       publish(generation, phase, error);
     }
@@ -281,7 +307,7 @@ static void audio_main(void *unused) {
       window_start = now;
       window_decode = 0;
     }
-    if (!hurry) LightEvent_WaitTimeout(&audio_wake, WAKE_NS);
+    if (!hurry) LightEvent_WaitTimeout(&audio_wake, applied_scratch ? SCRATCH_WAKE_NS : WAKE_NS);
   }
   close_player();
 }
@@ -492,6 +518,7 @@ void localmedia_forget_guest(void) {
   command_track = -1;
   command_phase = IDLE;
   atomic_store(&paused_flag, false);
+  atomic_store(&scratch_flag, false);
   for (int i = 0; i < art_handle_count; i++) ui_free_texture(art_handles[i]);
   art_handle_count = 0;
   art_id = -1;
@@ -525,6 +552,7 @@ int32_t localmedia_open(int32_t id) {
   command_duration = track->duration_ms;
   resumed_while_loading = false;
   atomic_store(&paused_flag, false);
+  atomic_store(&scratch_flag, false);
   post(&open_mail, track->duration_ms, path);
   return (int32_t)open_serial;
 }
@@ -542,6 +570,7 @@ void localmedia_paused(bool value) {
 }
 
 void localmedia_seek(double ms) {
+  atomic_store(&scratch_flag, false);
   unsigned position, duration, error;
   unsigned base = base_phase(&position, &duration, &error);
   if (command_track < 0 || base == IDLE || base == FAILED) return;
@@ -558,6 +587,28 @@ void localmedia_volume(double value) {
   LightEvent_Signal(&audio_wake);
 }
 
+void localmedia_scratch_begin(void) {
+  unsigned position, duration, error;
+  unsigned shown = command_track < 0 ? IDLE : visible_phase(base_phase(&position, &duration, &error));
+  if ((shown != PLAYING && shown != PAUSED) || ring_frames < LM_RING_FRAMES) return;
+  atomic_store(&scratch_rate_fp, 0);
+  atomic_store(&scratch_flag, true);
+  LightEvent_Signal(&audio_wake);
+}
+
+void localmedia_scratch_rate(double rate) {
+  const double limit = (double)LM_SCRATCH_MAX_RATE / LM_RATE_ONE;
+  double clamped = !isfinite(rate) ? 0 : rate < -limit ? -limit : rate > limit ? limit : rate;
+  atomic_store(&scratch_rate_fp, (int32_t)lround(clamped * LM_RATE_ONE));
+  LightEvent_Signal(&audio_wake);
+}
+
+void localmedia_scratch_end(void) {
+  if (!atomic_exchange(&scratch_flag, false)) return;
+  atomic_store(&scratch_rate_fp, 0);
+  LightEvent_Signal(&audio_wake);
+}
+
 void localmedia_status(char *out, size_t capacity) {
   adopt_scan();
   unsigned position, duration, error;
@@ -565,10 +616,10 @@ void localmedia_status(char *out, size_t capacity) {
   if (command_track < 0) position = duration = error = 0;
   snprintf(out, capacity,
     "{\"phase\":\"%s\",\"trackId\":%ld,\"openSerial\":%u,\"positionMs\":%u,\"durationMs\":%u,\"scanning\":%s,"
-    "\"scanGeneration\":%u,\"scanMs\":%u,\"underruns\":%u,\"error\":\"%s\",\"decodeLoad\":%u,\"artHandles\":%d}",
+    "\"scanGeneration\":%u,\"scanMs\":%u,\"underruns\":%u,\"error\":\"%s\",\"decodeLoad\":%u,\"artHandles\":%d,\"scratching\":%s}",
     PHASES[phase], (long)command_track, open_serial, position, duration, atomic_load(&scanning) ? "true" : "false",
     scan_generation, atomic_load(&scan_ms), atomic_load(&underruns), phase == FAILED ? ERRORS[error] : "", atomic_load(&decode_load),
-    art_handle_count);
+    art_handle_count, atomic_load(&scratch_flag) ? "true" : "false");
 }
 
 /* Uploads the finished pixels; never hands out core handle 0 (the contract's "none"). A

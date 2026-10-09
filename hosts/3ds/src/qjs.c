@@ -54,7 +54,7 @@
 typedef enum {
   HostMediaOpen, HostMediaClose, HostMediaPaused, HostMediaVolume, HostMediaTexture, HostMediaStatus,
   HostLocalScan, HostLocalTracks, HostLocalOpen, HostLocalPaused, HostLocalSeek, HostLocalVolume, HostLocalStatus,
-  HostLocalArtwork, HostLocalReleaseArtwork,
+  HostLocalArtwork, HostLocalReleaseArtwork, HostLocalScratchBegin, HostLocalScratchRate, HostLocalScratchEnd,
   HostOffloadSession, HostOffloadSubmit, HostOffloadTake, HostOffloadCoverage,
   HostCreateNode,
   HostDestroyNode,
@@ -296,6 +296,9 @@ static JSValue host_operation(
     }
     case HostLocalArtwork: return JS_NewInt32(ctx, localmedia_artwork(argument_int(ctx, argc, argv, 0)));
     case HostLocalReleaseArtwork: localmedia_release_artwork(argument_int(ctx, argc, argv, 0)); return JS_UNDEFINED;
+    case HostLocalScratchBegin: localmedia_scratch_begin(); return JS_UNDEFINED;
+    case HostLocalScratchRate: localmedia_scratch_rate(argument_float(ctx, argc, argv, 0)); return JS_UNDEFINED;
+    case HostLocalScratchEnd: localmedia_scratch_end(); return JS_UNDEFINED;
 #endif
     case HostCreateNode:
       return JS_NewInt32(ctx, ui_create_node((uint32_t)argument_int(ctx, argc, argv, 0)));
@@ -682,6 +685,9 @@ static void install_host(void) {
   add_operation(localmedia, "status", 0, HostLocalStatus);
   add_operation(localmedia, "artwork", 1, HostLocalArtwork);
   add_operation(localmedia, "releaseArtwork", 1, HostLocalReleaseArtwork);
+  add_operation(localmedia, "scratchBegin", 0, HostLocalScratchBegin);
+  add_operation(localmedia, "scratchRate", 1, HostLocalScratchRate);
+  add_operation(localmedia, "scratchEnd", 0, HostLocalScratchEnd);
   JS_SetPropertyStr(context, global, "localmedia", localmedia);
 #endif
 #ifdef POCKETJS_OFFLOAD

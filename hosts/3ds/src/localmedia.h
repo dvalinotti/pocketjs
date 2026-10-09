@@ -18,6 +18,12 @@ void localmedia_paused(bool paused);
 void localmedia_seek(double ms);
 void localmedia_volume(double volume);
 void localmedia_status(char *out, size_t capacity);
+/* The guest holds the platter: ignored unless a track is playing or paused and the 2 MiB ring
+ * was allocated. open and seek end it. */
+void localmedia_scratch_begin(void);
+/* Signed rate while held: 1 forward, -1 reverse, 0 still; clamped to ±4. */
+void localmedia_scratch_rate(double rate);
+void localmedia_scratch_end(void);
 int32_t localmedia_artwork(int32_t id);
 void localmedia_release_artwork(int32_t handle);
 /* {"cachedMs":…,"scanMs":…,"files":…,"parsed":…} for the last completed scan. */

@@ -172,6 +172,49 @@ int main(void) {
   WAIT_UNTIL(field(read_status(), "scanGeneration") > generation, 5000);
   CHECK(field(status, "scanGeneration") > generation);
 
+  /* Scratching: the snapshot reads back at once; the audio thread swaps the queue for three
+   * 1024-frame slots, a lift returns to normal slots, and an open or a seek ends it. */
+  CHECK(localmedia_open(b) > 0);
+  WAIT_UNTIL(phase_is("playing") && fake_queued() >= 4, 2000);
+  CHECK(strstr(read_status(), "\"scratching\":false") != NULL);
+  localmedia_scratch_begin();
+  CHECK(strstr(read_status(), "\"scratching\":true") != NULL);
+  WAIT_UNTIL(fake_queued() == 3, 2000);
+  fake_hold(true);
+  sleep_ms(30);
+  CHECK_INT(fake_drain(1u << 30), 3 * 1024);
+  fake_hold(false);
+  localmedia_scratch_rate(-1.0);
+  WAIT_UNTIL(fake_queued() == 3, 2000);
+  CHECK_INT(fake_queued(), 3);
+  CHECK(phase_is("playing"));
+  localmedia_scratch_end();
+  CHECK(strstr(read_status(), "\"scratching\":false") != NULL);
+  WAIT_UNTIL(fake_queued() >= 4, 2000);
+  CHECK(fake_queued() >= 4);
+  /* Paused, the platter still plays its slots, and the snapshot stays paused. */
+  localmedia_paused(true);
+  localmedia_scratch_begin();
+  CHECK(strstr(read_status(), "\"scratching\":true") != NULL);
+  CHECK(phase_is("paused"));
+  WAIT_UNTIL(fake_queued() == 3, 2000);
+  CHECK_INT(fake_queued(), 3);
+  localmedia_scratch_end();
+  localmedia_paused(false);
+  /* An open ends scratching; so does a seek. */
+  localmedia_scratch_begin();
+  CHECK(localmedia_open(a) > 0);
+  CHECK(strstr(read_status(), "\"scratching\":false") != NULL);
+  WAIT_UNTIL(phase_is("playing"), 2000);
+  localmedia_scratch_begin();
+  CHECK(strstr(read_status(), "\"scratching\":true") != NULL);
+  localmedia_seek(100);
+  CHECK(strstr(read_status(), "\"scratching\":false") != NULL);
+  /* An ended track ignores a grab. */
+  WAIT_UNTIL((fake_drain(1u << 30), phase_is("ended")), 3000);
+  CHECK(phase_is("ended"));
+  localmedia_scratch_begin();
+  CHECK(strstr(read_status(), "\"scratching\":false") != NULL);
   /* Out of memory during a rescan (its big allocations fail, small ones still succeed): the
    * list stays, not an empty one, and scanning ends. */
   size_t length;
