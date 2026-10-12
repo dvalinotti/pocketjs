@@ -9,7 +9,7 @@ import {
   type PocketPackageVariant,
 } from "../contracts/spec/pocket-package.ts";
 import { canonicalJson } from "../framework/src/manifest/plan.ts";
-import { resolve3dsBuildPlan } from "../tools/3ds-profile.ts";
+import { THREE_DS_DEV_HOST_ABI, resolve3dsBuildPlan } from "../tools/3ds-profile.ts";
 import { makeVariant } from "../tools/pocket-pack.ts";
 import {
   parse3dsx,
@@ -92,7 +92,7 @@ async function runtimeFiles(overrides: { target?: string; hostAbi?: number; prog
   const program = runtimeProgram();
   const manifest = {
     target: overrides.target ?? "3ds-dev",
-    hostAbi: overrides.hostAbi ?? 11,
+    hostAbi: overrides.hostAbi ?? THREE_DS_DEV_HOST_ABI,
     pocketjs: "0000000000000000000000000000000000000000",
     profile: "3ds-dev",
     files: { "runtime.3dsx": { bytes: program.length, sha256: await sha256Hex(program) } },
@@ -218,7 +218,10 @@ describe("repack3ds", () => {
 
   test("refuses a runtime for another target, a wrong host ABI and a broken footer", async () => {
     await expect(repack3ds(await input({ runtime: await runtimeFiles({ target: "psp" }) }))).rejects.toThrow(/for "psp", not "3ds-dev"/);
-    await expect(repack3ds(await input({ runtime: await runtimeFiles({ hostAbi: 12 }) }))).rejects.toThrow(/host ABI 11; this runtime is ABI 12/);
+    const otherAbi = THREE_DS_DEV_HOST_ABI + 1;
+    await expect(repack3ds(await input({ runtime: await runtimeFiles({ hostAbi: otherAbi }) }))).rejects.toThrow(
+      new RegExp(`host ABI ${THREE_DS_DEV_HOST_ABI}; this runtime is ABI ${otherAbi}`),
+    );
 
     const broken = pocketFor();
     broken[40] ^= 0xff;
