@@ -23,14 +23,14 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url));
 /** The kernel: the crate a game links, and the modules of its page. */
 export const POCKET3D_WEB = {
   crate: join(ROOT, "devices/web/pocket-web-wgpu"),
-  modules: ["pocket3d-shell.js", "pocket3d-interface.js", "pocket3d-controls.js", "pocket3d-stage.js", "pocket3d-stage.css", "pocket3d-player.js", "pocket3d-player.css"],
+  modules: ["pocket3d-shell.js", "pocket3d-interface.js", "pocket3d-controls.js", "pocket3d-stage.js", "pocket3d-stage.css", "pocket3d-player.js", "pocket3d-player.css", "pocket3d-words.js"],
   /** What the player's modules load beside themselves: the handhelds' shells with their profiles, and the display face. */
   assets: ["shells", "fonts"],
   /** The Pocket3D title card for a page, as pocket3d-title ships it. */
   title: ["pocket3d-title.js", "art.js"],
   /** The realm of a guest: PocketJS's AppInstance and what it imports. A realm started with
    *  `text: false` reads no text worker, so the worker and its wasm are not staged. */
-  realm: ["app-instance.html", "app-instance.js", "wasm-ops.js", "offload-worker.js"],
+  realm: ["app-instance.html", "app-instance.js", "wasm-ops.js", "runtime-glyphs.js", "offload-worker.js"],
   core: "pocketjs.wasm",
   /** What a host needs of the framework to hand a guest its contacts and name its buttons. */
   host: "pocketjs-host.js",
