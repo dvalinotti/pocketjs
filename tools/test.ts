@@ -40,7 +40,7 @@ const SUITE: readonly Stage[] = [
     // .github/workflows/native-c-harness.yml; tests/test-suite.test.ts
     // verifies these exclusions against that workflow.
     name: "unit",
-    // wasm-auxiliary.test.ts, wasm-premultiplied.test.ts and pocket3d-web.test.ts load hosts/web/pocketjs.wasm.
+    // wasm-auxiliary.test.ts, wasm-premultiplied.test.ts, pocket3d-web.test.ts and runtime-glyphs.test.ts load hosts/web/pocketjs.wasm.
     prep: [["bun", "tools/wasm.ts"]],
     tests: [
       "tests/device-lease.test.ts",
@@ -61,6 +61,7 @@ const SUITE: readonly Stage[] = [
       "tests/site-stage.test.ts",
       "tests/site-nexus.test.ts",
       "tests/site-pocket3d.test.ts",
+      "tests/site-microts.test.ts",
       "tests/site-arcade.test.ts",
       "tests/site-showcase.test.ts",
       "tests/motions-attribution.test.ts",
@@ -75,6 +76,7 @@ const SUITE: readonly Stage[] = [
       "tests/pocket3d-interface.test.ts",
       "tests/pocket3d-license.test.ts",
       "tests/pocket3d-web.test.ts",
+      "tests/runtime-glyphs.test.ts",
       "tests/media-service.test.ts",
       "tests/media.test.ts",
       "tests/service-client.test.ts",
@@ -83,6 +85,13 @@ const SUITE: readonly Stage[] = [
       "tests/3ds-native-install.test.ts",
       "tests/3ds-runtime-state.test.ts",
       "tests/3ds-runtime-wire.test.ts",
+      "tests/repack-3ds.test.ts",
+      "tests/repack-ipod.test.ts",
+      "tests/repack-shared.test.ts",
+      "tests/repack-sfo.test.ts",
+      "tests/repack-psp.test.ts",
+      "tests/repack-palette.test.ts",
+      "tests/repack-vita.test.ts",
       "tests/3ds-soc.test.ts",
       "tests/3ds-arguments.test.ts",
       "tests/localmedia.test.ts",
@@ -133,6 +142,8 @@ const SUITE: readonly Stage[] = [
       "tests/moto-g-play-profile.test.ts",
       "tests/redmi-1s-profile.test.ts",
       "tests/android-icon.test.ts",
+      "tests/repack-android.test.ts",
+      "tests/repack-worker.test.ts",
       "tests/offload-provider.test.ts",
       "tests/companion-session.test.ts",
       "tests/resource-cache.test.ts",
@@ -221,6 +232,7 @@ const SUITE: readonly Stage[] = [
       "tests/aot-constant-contracts.test.ts",
       "tests/aot-codegen.test.ts",
       "tests/aot-differential.test.ts",
+      "tests/microts-layout-baked.test.ts",
       "tests/solid-for.test.ts",
       "tests/solid-aot-lab.test.ts",
       "tests/vue-vapor-frame-flush.test.ts",
