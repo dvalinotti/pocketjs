@@ -1,0 +1,31 @@
+name: media.local and the iPoDS 3DS host
+# The ipo-ds branch's own additions: the media.local contract, its sim host,
+# the 3DS host's C units compiled for the build machine under ASan and UBSan,
+# the 3DS build arguments, and the sim bundle the iPoDS tests boot. Runs on
+# every pull request so an upstream sync is checked against them.
+on:
+  pull_request:
+  push:
+    branches: [ipo-ds]
+permissions:
+  contents: read
+jobs:
+  localmedia:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine/wasm
+      - run: bun tools/wasm.ts
+      - run: bun test tests/localmedia.test.ts tests/localmedia-sim.test.ts tests/localmedia-native.test.ts tests/3ds-arguments.test.ts
+      - run: bun tools/build.ts cafe-main
+      - run: bun test --conditions=browser tests/sim-bundle.test.ts
