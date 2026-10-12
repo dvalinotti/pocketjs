@@ -116,7 +116,7 @@ describe("media.local native units (host-compiled)", () => {
     const units = ["localmedia.c", "localmedia_cache.c", "localmedia_dir.c", "localmedia_ids.c", "localmedia_tags.c", "localmedia_mp3.c", "localmedia_art.c", "localmedia_library.c", "localmedia_player.c", "localmedia_ring.c"];
     const compile = Bun.spawnSync(["cc", "-std=c11", "-D_DEFAULT_SOURCE", "-O1", "-g", "-pthread", "-fsanitize=address,undefined", "-fno-sanitize-recover=undefined",
       "-DLM_TEST_ALLOC_FAIL", `-DLOCALMEDIA_ROOT="${music}/"`, `-DLOCALMEDIA_CACHE_DIR="${join(scratch, "glue-cache")}"`, `-I${glue}`, `-I${join(ROOT, "hosts/3ds/include")}`, `-I${SRC}`, `-I${join(ROOT, "hosts/3ds/vendor")}`,
-      join(glue, "glue-test.c"), join(glue, "glue-fake.c"), join(FIXTURES, "alloc-fail.c"), ...units.map((unit) => join(SRC, unit)), "-o", binary]);
+      join(glue, "glue-test.c"), join(glue, "glue-fake.c"), join(FIXTURES, "alloc-fail.c"), ...units.map((unit) => join(SRC, unit)), "-o", binary, "-lm"]);
     if (compile.exitCode !== 0) throw new Error(`compile glue-test.c failed:\n${compile.stderr.toString()}`);
     const result = Bun.spawnSync([binary], { cwd: FIXTURES, timeout: 60_000 });
     if (result.exitCode !== 0) throw new Error(`glue-test failed (exit ${result.exitCode}):\n${result.stderr.toString()}${result.stdout.toString()}`);

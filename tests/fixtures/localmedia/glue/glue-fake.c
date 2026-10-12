@@ -41,9 +41,15 @@ void fake_hold(bool held) {
   pthread_mutex_lock(&hold_lock); holding = held; pthread_cond_broadcast(&hold_cond); pthread_mutex_unlock(&hold_lock);
 }
 unsigned fake_waits(void) { return atomic_load(&waits); }
+/* libctru has no LightEvent teardown, so the host never releases an event;
+ * the fake draws them from a static pool to keep LeakSanitizer quiet. */
+static EventImpl event_pool[8];
+static atomic_uint events_used;
 void LightEvent_Init(LightEvent *event, ResetType reset) {
   (void)reset;
-  EventImpl *e = calloc(1, sizeof *e);
+  unsigned slot = atomic_fetch_add(&events_used, 1);
+  if (slot >= sizeof event_pool / sizeof event_pool[0]) abort();
+  EventImpl *e = &event_pool[slot];
   pthread_mutex_init(&e->lock, NULL); pthread_cond_init(&e->cond, NULL);
   event->impl = e;
 }
