@@ -127,6 +127,9 @@
     "engine/pocket3d/crates/pocket3d-anim/Cargo.toml",
     "engine/pocket3d/crates/pocket3d-mesh/src",
     "engine/pocket3d/crates/pocket3d-mesh/Cargo.toml",
+    "engine/pocket3d/crates/pocket3d-packs/src",
+    "engine/pocket3d/crates/pocket3d-packs/Cargo.toml",
+    "engine/pocket3d/crates/pocket3d-packs/pocket3d_packs.h",
     "engine/pocket3d/crates/pocket3d/src",
     "engine/pocket3d/crates/pocket3d/Cargo.toml",
     "engine/pocket3d/examples/handheld/src",
@@ -159,6 +162,9 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "pocketjs": {
+    "protocol": 1
   },
   "exports": {
     ".": "./framework/src/index.ts",
@@ -285,7 +291,6 @@
   },
   "description": "A portable application runtime that turns modern component code into native pixels across radically different hardware: Solid, Vue Vapor and Octane over a native Rust core, with build-time Tailwind styling and 60 FPS animation under an 8 MB memory budget.",
   "scripts": {
-    "bootstrap": "bun tools/bootstrap.ts",
     "pocket": "bun tools/pocket.ts",
     "build": "bun tools/build.ts",
     "play": "bun tools/play.ts",
@@ -313,6 +318,7 @@
     "e2e:3ds": "bun tests/e2e/azahar.ts",
     "e2e:3ds-runtime": "bun tests/e2e/azahar-runtime.ts",
     "e2e:3ds-dev": "bun tests/e2e/azahar-devserver.ts",
+    "e2e:install": "bun tests/e2e/framework-install.ts",
     "3ds:dev": "bun tools/3ds-dev.ts",
     "hw": "bun tools/hw.ts",
     "dev": "bun tools/dev.ts",
@@ -361,22 +367,26 @@
     "test:fuzz": "bun microts/compiler/model-fuzz.ts"
   },
   "dependencies": {
-    "@solid-primitives/keyed": "^1.5.3",
+    "@babel/core": "7.29.7",
+    "@babel/preset-typescript": "7.29.7",
+    "@solid-primitives/keyed": "1.5.3",
     "@volar/typescript": "2.4.28",
+    "@vue-jsx-vapor/runtime": "3.2.19",
     "@vue/compiler-dom": "3.6.0-rc.1",
     "@vue/compiler-sfc": "3.6.0-rc.1",
     "@vue/compiler-vapor": "3.6.0-rc.1",
     "@vue/language-core": "3.3.11",
+    "babel-plugin-jsx-dom-expressions": "0.40.7",
+    "babel-preset-solid": "1.9.12",
     "octane": "0.1.26",
-    "solid-js": "^1.9",
+    "opentype.js": "1.3.5",
+    "solid-js": "1.9.14",
     "typescript": "5.9.3",
     "vue": "3.6.0-rc.1",
     "vue-jsx-vapor": "3.2.19"
   },
   "devDependencies": {
-    "@babel/core": "^7",
     "@babel/generator": "^7.29.7",
-    "@babel/preset-typescript": "^7",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/lang-javascript": "^6.2.5",
     "@codemirror/lang-vue": "^0.1.3",
@@ -393,10 +403,8 @@
     "@types/bun": "^1.2",
     "@types/opentype.js": "^1.3.10",
     "@types/three": "^0.185.0",
-    "babel-preset-solid": "^1.9",
     "codemirror": "^6.0.2",
     "marked": "^18.0.5",
-    "opentype.js": "^1.3",
     "shiki": "^4.3.1",
     "sucrase": "^3.35.0",
     "tailwindcss": "^4.3.2",

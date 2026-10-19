@@ -351,12 +351,13 @@ rustup target add wasm32-unknown-unknown
 bun run dev                    # build WASM + the Hero app, then serve the browser host
 ```
 
-The CLI operates inside a PocketJS checkout:
+The `pocket` CLI runs on Bun. The
+[CLI reference](https://pocketjs.pocket.nexus/docs/cli/) lists its commands,
+scaffolding options and target toolchains:
 
 ```sh
-npm install -g @pocketjs/cli
-pocket doctor                  # report missing host and target tooling
-pocket setup                   # install the pinned web + PSP toolchain
+bun add -g @pocketjs/cli       # or: npm install -g @pocketjs/cli
+pocket target add psp          # install the PSP toolchain the framework pins
 pocket create my-app
 pocket check --target psp --manifest apps/my-app/pocket.json
 pocket build --target psp --manifest apps/my-app/pocket.json -- --release
