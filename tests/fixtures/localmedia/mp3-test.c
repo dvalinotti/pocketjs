@@ -1,4 +1,4 @@
-#include "../../../hosts/3ds/src/localmedia_mp3.h"
+#include "../../../products/3ds/src/localmedia_mp3.h"
 #include "check.h"
 
 static long file_size(FILE *f) { fseek(f, 0, SEEK_END); return ftell(f); }

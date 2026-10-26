@@ -7,8 +7,8 @@ import {
   dropIn,
   parseArgs,
   parseProbeOutput,
-  resolveOutroTiming,
   resolveOutputSpec,
+  resolveOutroTiming,
   sourceOutroTransition,
   xCompatibilityArgs,
 } from "../skills/pocketjs-video-outro/scripts/make-outro.ts";
@@ -26,7 +26,7 @@ describe("branding defaults", () => {
     for (const name of ["pocket3d", "Pocket3D"]) {
       const result = parseArgs(["-i", import.meta.path, "--brand", name]);
       expect(result.brand).toBe("pocket3d");
-      expect(result.tagline.split("\n")).toEqual(["Create 3D on", "every screen", "you love"]);
+      expect(result.tagline.split("\n")).toEqual(["Create 3D on", "every device", "you love"]);
       expect(result.url).toBe("3d.pocket.nexus");
     }
   });
@@ -60,7 +60,17 @@ describe("card assets", () => {
     const face = ASSETS.find((path) => basename(path) === "press-start-2p-latin.woff2")!;
     expect(readFileSync(face).equals(readFileSync(join(root, "site/assets/fonts/press-start-2p-latin.woff2")))).toBe(true);
   });
+
+  test("the Pocket3D ground is the confetti of 3d.pocket.nexus", () => {
+    const card = readFileSync(join(root, "skills/pocketjs-video-outro/assets/outro.html"), "utf8");
+    const page = readFileSync(join(root, "site/pocket3d/public/index.html"), "utf8");
+    const ground = /body\[data-brand="pocket3d"\] \.ground::after \{[^}]*\}/.exec(card)?.[0] ?? "";
+    const confetti = ground.match(/url\("data:image\/svg\+xml,[^"]+"\)/g) ?? [];
+    expect(confetti).toHaveLength(2);
+    for (const piece of confetti) expect(page).toContain(piece);
+  });
 });
+
 
 describe("short outro timing", () => {
   test("defaults to a 2-second card with a readable hold", () => {

@@ -1,4 +1,4 @@
-/* A host stand-in for the parts of libctru that hosts/3ds/src/localmedia.c uses:
+/* A host stand-in for the parts of libctru that products/3ds/src/localmedia.c uses:
  * threads are pthreads, LightEvents are condition variables, and NDSP is a fake
  * channel whose queued wavebufs play only when the test drains them
  * (glue-fake.c). Lets the media.local glue run under ASan on the host. */

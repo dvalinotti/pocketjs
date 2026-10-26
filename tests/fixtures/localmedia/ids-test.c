@@ -1,4 +1,4 @@
-#include "../../../hosts/3ds/src/localmedia_ids.h"
+#include "../../../products/3ds/src/localmedia_ids.h"
 #include "check.h"
 
 int main(void) {

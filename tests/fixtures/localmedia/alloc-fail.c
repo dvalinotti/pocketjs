@@ -1,4 +1,4 @@
-/* The allocation hook behind LM_TEST_ALLOC_FAIL (hosts/3ds/src/localmedia_alloc.h). */
+/* The allocation hook behind LM_TEST_ALLOC_FAIL (products/3ds/src/localmedia_alloc.h). */
 #include <stdatomic.h>
 #include <stdlib.h>
 

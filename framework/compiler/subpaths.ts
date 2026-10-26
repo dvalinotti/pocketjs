@@ -21,7 +21,7 @@
 // per-framework shim for solid and vue-vapor (octane still does not resolve
 // them).
 
-import type { PocketFramework } from "../src/config.ts";
+import type { PocketFramework } from "../../contracts/spec/pocket-manifest.ts";
 
 export const POCKET_FRAMEWORKS = ["solid", "vue-vapor", "octane"] as const;
 
@@ -81,7 +81,33 @@ export const SUBPATHS: Record<string, SubpathDecl> = {
   "media/audio": { file: "contracts/spec/media-adpcm.ts" },
   localmedia: { file: "framework/src/localmedia.ts" },
   clock: { file: "framework/src/clock.ts", aliases: TWINS },
-  config: { file: "framework/src/config.ts" },
+  profile: { file: "framework/src/profile.ts" },
+  "runtime-config": { file: "framework/src/runtime-config.ts" },
+  profiles: { file: "profiles/index.ts" },
+  "profiles/psp-runtime": { file: "profiles/psp-runtime.ts" },
+  "profiles/3ds-runtime": { file: "profiles/3ds-runtime.ts" },
+  "profiles/psp": { file: "profiles/psp.ts" },
+  "profiles/vita": { file: "profiles/vita.ts" },
+  "profiles/3ds-dev": { file: "profiles/3ds-dev.ts" },
+  "profiles/pocketbook": { file: "profiles/pocketbook.ts" },
+  "profiles/web-app": { file: "profiles/web-app.ts" },
+  "profiles/macos-app": { file: "profiles/macos-app.ts" },
+  "profiles/linux-app": { file: "profiles/linux-app.ts" },
+  "profiles/macos-widget": { file: "profiles/macos-widget.ts" },
+  "profiles/moto-g-play-dev": { file: "profiles/moto-g-play-dev.ts" },
+  "profiles/redmi-1s-dev": { file: "profiles/redmi-1s-dev.ts" },
+  "profiles/blackberry-qnx-dev": { file: "profiles/blackberry-qnx-dev.ts" },
+  "profiles/meizu-m8-dev": { file: "profiles/meizu-m8-dev.ts" },
+  "profiles/symbian-e7-dev": { file: "profiles/symbian-e7-dev.ts" },
+  "profiles/ios-dev": { file: "profiles/ios-dev.ts" },
+  "profiles/iphone2g-dev": { file: "profiles/iphone2g-dev.ts" },
+  "profiles/iphone4s-dev": { file: "profiles/iphone4s-dev.ts" },
+  "profiles/ipodtouch-dev": { file: "profiles/ipodtouch-dev.ts" },
+  "profiles/ipodtouch4-dev": { file: "profiles/ipodtouch4-dev.ts" },
+  "profiles/macos-embedded": { file: "profiles/macos-embedded.ts" },
+  "profiles/gba": { file: "profiles/gba.ts" },
+  "profiles/ipodnano": { file: "profiles/ipodnano.ts" },
+
   db: { file: "framework/src/db-api.ts", aliases: TWINS },
   components: {
     file: {
@@ -103,6 +129,7 @@ export const SUBPATHS: Record<string, SubpathDecl> = {
     aliases: ["vue-vapor"],
   },
   host: { file: "framework/src/host.ts" },
+  "guest-web": { file: "engine/guest-web/src/generated-ui.js" },
   "overlay-host": { file: "framework/src/overlay-host.ts" },
   "themes/desktop": { file: "framework/src/themes/desktop.ts" },
   lifecycle: {
@@ -131,7 +158,6 @@ export const SUBPATHS: Record<string, SubpathDecl> = {
   },
   launcher: { file: "framework/src/launcher.ts" },
   manifest: { file: "framework/src/manifest/index.ts" },
-  "idf-host": { file: "framework/src/manifest/idf-host.ts" },
   net: { file: "framework/src/net-api.ts", aliases: TWINS },
   osk: { file: { solid: "framework/src/osk.tsx" } },
   package: { file: "contracts/spec/pocket-package.ts" },
@@ -140,6 +166,7 @@ export const SUBPATHS: Record<string, SubpathDecl> = {
   platform: { file: "framework/src/platform.ts" },
   modality: { file: "framework/src/modality.ts" },
   actions: { file: { solid: "framework/src/actions.ts" } },
+  agent: { file: { solid: "framework/src/agent.ts" } },
   system: { file: { solid: "framework/src/system.ts" } },
   "vita-package": { file: "tools/vita-package.ts" },
   prelude: {
@@ -177,6 +204,9 @@ export const SUBPATHS: Record<string, SubpathDecl> = {
   "model/animation": { file: "framework/src/model-animation.ts" },
   "net/model": { file: "framework/src/net-model.ts" },
   physics: { file: "framework/src/physics.ts", aliases: TWINS },
+  link: { file: "framework/src/link.ts" },
+  wifi: { file: "framework/src/wifi.ts" },
+  camera: { file: "framework/src/camera.ts" },
 };
 
 /** The bare npm export target for a row (npmFile > invariant file > solid). */

@@ -61,6 +61,51 @@
         }
       }
     },
+    "applet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "services": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,31}$"
+          },
+          "uniqueItems": true,
+          "maxItems": 8
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253,
+            "pattern": "^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$"
+          },
+          "uniqueItems": true,
+          "maxItems": 8
+        },
+        "store": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maxBytes"
+          ],
+          "properties": {
+            "maxBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4194304
+            }
+          }
+        }
+      }
+    },
     "engine": {
       "type": "object",
       "additionalProperties": false,
@@ -123,6 +168,71 @@
             "octane"
           ]
         },
+        "theme": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "keyframes": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "number"
+                          }
+                        ]
+                      }
+                    }
+                  }
+                },
+                "animation": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "value"
+                        ],
+                        "properties": {
+                          "value": {
+                            "type": "string"
+                          },
+                          "loop": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "number"
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            }
+          ]
+        },
         "aot": {
           "type": "boolean"
         },
@@ -147,9 +257,7 @@
             "auxiliary": {
               "type": "object",
               "additionalProperties": false,
-              "required": [
-                "fixed"
-              ],
+              "description": "Exactly one of fixed and adaptive (checked at resolution).",
               "properties": {
                 "fixed": {
                   "type": "object",
@@ -176,6 +284,34 @@
                         "native",
                         "stretch"
                       ]
+                    }
+                  }
+                },
+                "adaptive": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "min",
+                    "max"
+                  ],
+                  "properties": {
+                    "min": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "minItems": 2,
+                      "maxItems": 2
+                    },
+                    "max": {
+                      "type": "array",
+                      "items": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "minItems": 2,
+                      "maxItems": 2
                     }
                   }
                 }
@@ -515,9 +651,7 @@
                   "auxiliary": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": [
-                      "fixed"
-                    ],
+                    "description": "Exactly one of fixed and adaptive (checked at resolution).",
                     "properties": {
                       "fixed": {
                         "type": "object",
@@ -544,6 +678,34 @@
                               "native",
                               "stretch"
                             ]
+                          }
+                        }
+                      },
+                      "adaptive": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "min",
+                          "max"
+                        ],
+                        "properties": {
+                          "min": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "minItems": 2,
+                            "maxItems": 2
+                          },
+                          "max": {
+                            "type": "array",
+                            "items": {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            "minItems": 2,
+                            "maxItems": 2
                           }
                         }
                       }

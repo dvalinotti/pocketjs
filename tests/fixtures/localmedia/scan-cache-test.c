@@ -1,7 +1,7 @@
 /* A scan with a cache: unchanged files are reused, changed and new files are read, removed
  * files drop out, and the list built from the cache matches the scan that wrote it. A second
  * reader gives the same list. */
-#include "../../../hosts/3ds/src/localmedia_library.h"
+#include "../../../products/3ds/src/localmedia_library.h"
 #include "check.h"
 
 #include <pthread.h>
