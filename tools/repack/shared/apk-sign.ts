@@ -174,7 +174,8 @@ async function signingKey(privateKey: CryptoKey | Uint8Array): Promise<CryptoKey
       fail("the private key is not an RSA PKCS #8 key");
     }
   }
-  const algorithm = privateKey.algorithm as RsaHashedKeyAlgorithm;
+  // RsaHashedKeyAlgorithm is a DOM lib name; the fields read here keep the check under lib ESNext.
+  const algorithm = privateKey.algorithm as { readonly name: string; readonly hash?: { readonly name: string } };
   if (privateKey.type !== "private" || algorithm.name !== "RSASSA-PKCS1-v1_5" || algorithm.hash?.name !== "SHA-256" || !privateKey.usages.includes("sign")) {
     fail("the private key is not an RSASSA-PKCS1-v1_5 SHA-256 signing key");
   }
