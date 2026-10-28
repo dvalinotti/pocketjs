@@ -1,4 +1,4 @@
-#include "../../../hosts/3ds/src/localmedia_ring.h"
+#include "../../../products/3ds/src/localmedia_ring.h"
 #include "check.h"
 
 #include <stdint.h>

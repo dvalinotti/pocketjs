@@ -2,7 +2,7 @@
 
 The MicroTS site belongs to the Pocket family ([pocket.nexus](https://pocket.nexus/), [PocketJS](https://pocketjs.pocket.nexus/), [Pocket3D](https://3d.pocket.nexus/)) and uses the family's **Arcade look**: a dark purple ground, five candy colors, hard drop shadows and pixel headings. The values are copied from `site/assets/arcade.css` and `site/assets/tokens.css` in this repository. Those two files are the reference for the family look: change them first, then carry the change into `src/styles/main.css`.
 
-This file describes the visual and interaction rules; the implementation is in `src/styles/main.css` (tokens and component classes) and `src/components/`. Paths that start with `src/` or `lib/` are relative to `site/microts/`; `site/…`, `apps/…` and `hosts/…` paths are relative to the repository root.
+This file describes the visual and interaction rules; the implementation is in `src/styles/main.css` (tokens and component classes) and `src/components/`. Paths that start with `src/` or `lib/` are relative to `site/microts/`; `site/…`, `apps/…` and `programs/…` paths are relative to the repository root.
 
 ---
 
@@ -68,7 +68,7 @@ The MicroTS mark is a **plum tile in a yellow frame with a cyan italic μ**, and
 | Location | Hue | Reason |
 |---|---|---|
 | Home hero plate | pink | Matches the PocketJS home page; the family entry color |
-| One source (the source and its three build paths) | cyan | Code screens are cyan |
+| One source (the counter in Solid and Vue, and its three build paths) | cyan | Code screens are cyan |
 | How it compiles (the compiler pipeline) | lilac | The color of the mark's lower bars, stands for the compiler |
 | Pick a model (the two model modes) | yellow | A choice between options |
 | Made with MicroTS (Pocket Retro) | pink | Games and entertainment content |
@@ -153,13 +153,15 @@ All component classes are defined in `@layer components` in `src/styles/main.css
 | `.plate` | Dark glass plate with a 4px hue border | Home page main title |
 | `.bulbs` | Row of small bulbs in four colors (yellow, pink, cyan, lilac) with gaps between them | Marquee along the bottom of the plate |
 | `.spark` / `.heart` | Pixel sprites drawn through a mask: the spark in the current hue, the heart in pink | Decoration, list markers |
-| `CodeTabs` | Code panel with arcade keys as tabs (pre-rendered with Shiki); a new tab list returns to the first tab and the top, and `fill` makes the screen take the remaining height and scroll | Home page code samples |
+| `CodeTabs` | Code panel with arcade keys as tabs (pre-rendered with Shiki); a new tab list returns to the first tab and the top, and `fill` makes the screen take the remaining height and scroll; the `head` slot sits above the file keys | Home page code samples |
 | `.doc` | Docs body typography: cyan links, yellow inline code, pink square list bullets, lilac-bordered tables | Rendered Markdown |
 | `.code-block` | Shiki screen with a 3px translucent cyan border | Docs code blocks |
 
 **Code highlighting** uses Shiki `one-dark-pro` for all code (the same theme as the PocketJS docs and the playground editor) and is rendered at build time. The editor is CodeMirror 6 with the one-dark theme, the background changed to `screen`, and a yellow cursor and selection.
 
 **Handheld shell** (right side of the home page): lilac body, `shade` screen bezel, `out` D-pad, pink/yellow A and B buttons. The screen cycles through Pocket Retro game screenshots (the posters at `/retro/<id>/poster.png`, `image-rendering: pixelated`) every 2.6 s, with a row of pellets in the bezel marking the current one. The device is not a link.
+
+**One source** (home page): the code panel is the first column, as in the Familiar tools section of the PocketJS home page, and the three build paths stand to its right (below it on narrow screens). The lede names Solid and Vue and links to their sites. Two framework keys, Solid then Vue, sit in the panel's `head` slot above a dotted rule: Fredoka 600 1rem, the section hue when selected, otherwise the file keys' colors. Picking one shows that framework's counter, its view file first (`Counter.tsx` or `Counter.vue`), then `Counter.ts`, `gen/counter.rs` and the `src/main.rs` both share (`content/home/counter-solid.md`, `counter-vue.md`, `counter-rust.md`). A text link at the right of the framework keys opens the same counter's playground preset. The view and model files are the playground starters, and both generate the same `gen/counter.rs`. The "Follow one binding" table below gives each binding in Solid TSX and in the Vue template, with one cell across both columns where the two are written the same.
 
 **Made with MicroTS** (home page): the six games from the handheld are buttons. Picking one marks its card yellow and shows its `game.ts` and a Build tab for that game in the code panel; the page does not navigate. Each game's highlighted source is a separate chunk, loaded on hover, focus or pick, and the panel keeps the previous game on screen under `LOADING` until it arrives. From the `lg` breakpoint the panel takes the height of the card grid and its screen scrolls; below it the panel has a fixed height, and a pick scrolls it into view. A text link in the panel's tab bar opens the picked game in the playground.
 
@@ -214,9 +216,9 @@ Neither path compiles Rust. The start page lead and the bottom of the stage both
 - Devices (`src/playground/devices.ts` + `DeviceFrame.vue`): **a picture of the real device from the front**, rendered in Blender from a 3D model, with the screen where the picture's screen is. The pictures and their profiles (where the screen, each key and each moving part are, in the picture's pixels) come from `tools/handheld-shells.ts`, and reach the app as `microts:shells` (`lib/shells.ts`); the PSP and the 3DS are the Pocket3D player's, the others are in `shells/`. `devices.ts` holds what each key is to an app; key mappings come from the pocketjs device hosts.
   | Device | Picture | Layout and input |
   |---|---|---|
-  | GBA | LightningGrey's model (CC BY 4.0), its case recoloured indigo | D-pad left of the screen, A / B to the right, SELECT / START at the bottom left, L / R on the top corners. In UI apps A → ○ and B → × (`hosts/gba`); retro games receive the GBA buttons unmapped |
+  | GBA | LightningGrey's model (CC BY 4.0), its case recoloured indigo | D-pad left of the screen, A / B to the right, SELECT / START at the bottom left, L / R on the top corners. In UI apps A → ○ and B → × (`programs/gba`); retro games receive the GBA buttons unmapped |
   | PSP | Dibad's model (CC BY 4.0) | D-pad and analog nub on the left, △○×□ on the right, L / R on the shoulders, SELECT / START below the screen on the right. The nub does not respond |
-  | 3DS | PocketJS's New 3DS model, lid flat | The top screen is the app's main screen; the touch screen below is the secondary screen, unused by the preview, and says so on hover. Circle pad, D-pad, ABXY (A → ○, B → ×, X → △, Y → □, `hosts/3ds`), SELECT / START; L and R are behind the hinge, so their letters stand at its ends |
+  | 3DS | PocketJS's New 3DS model, lid flat | The top screen is the app's main screen; the touch screen below is the secondary screen, unused by the preview, and says so on hover. Circle pad, D-pad, ABXY (A → ○, B → ×, X → △, Y → □, `products/3ds`), SELECT / START; L and R are behind the hinge, so their letters stand at its ends |
   | iPhone 2G / 4S | EwanLejkowski's iPhone 4S (CC BY 4.0) | Touch screen, no buttons for the app; a tap or drag on the screen is touch input, packed in the pocketjs format together with the hit-test result. The Home button belongs to the system and says so on hover |
   | iPod touch | thethieme's white iPhone 5 (CC BY 4.0), without the earpiece and sensor an iPod touch lacks | As the iPhone |
   | BlackBerry Classic | Jakub Proszowski's model (CC BY 4.0) | Square touch screen; the row under it (Call / ☰ Menu / trackpad / Back / End) and a full keyboard. ☰ → △; a drag on the trackpad produces direction pulses, a tap → ○. On the keyboard, Space (START) and Enter (○) produce input; the other keys do not respond. Call, Back and End belong to the system and say so on hover |

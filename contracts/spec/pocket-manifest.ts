@@ -4,7 +4,8 @@ import {
   type ExecutionClass,
   type PresentationMode,
   type Viewport,
-} from "./platforms.ts";
+} from "./platform-types.ts";
+import { appletSchema, type AppletDeclaration } from "./applet.ts";
 import { modalityRequirementSchema, type ModalityRequirement } from "./modality.ts";
 
 export const POCKET_MANIFEST_VERSION = 2 as const;
@@ -40,6 +41,15 @@ export interface JsonSchemaObject {
 
 export type JsonSchema = boolean | JsonSchemaObject;
 
+export type PocketFramework = "solid" | "vue-vapor" | "octane";
+export type KeyframeProps = Record<string, string | number>;
+export type Keyframes = Record<string, KeyframeProps>;
+/** Application animation content baked into the style table. */
+export interface AnimationTheme {
+  keyframes?: Record<string, Keyframes>;
+  animation?: Record<string, string | { value: string; loop?: string | number }>;
+}
+
 export interface PocketManifestV2 {
   readonly $schema: typeof POCKET_MANIFEST_SCHEMA_ID;
   readonly pocket: typeof POCKET_MANIFEST_VERSION;
@@ -58,6 +68,12 @@ export interface PocketManifestV2 {
   readonly execution?: {
     readonly classes: readonly ExecutionClass[];
   };
+  /**
+   * Declares the package a Pocket Applet (contracts/spec/applet.ts): the
+   * program a launcher runs, held to the applet rules at resolution and
+   * build. Absent, the package is an ordinary app.
+   */
+  readonly applet?: AppletDeclaration;
   readonly engine: {
     readonly capabilities: {
       readonly requires: readonly string[];
@@ -67,7 +83,13 @@ export interface PocketManifestV2 {
   readonly app: {
     readonly entry: string;
     readonly output?: string;
-    readonly framework: "solid" | "vue-vapor" | "octane";
+    readonly framework: PocketFramework;
+    /**
+     * Animation content, or the path of a module relative to this file whose
+     * default export is that content. `readPocketManifest` replaces the path
+     * with the export; a build plan and a package carry the content.
+     */
+    readonly theme?: AnimationTheme | string;
     /** Admit the complete Solid component graph to the AOT view subset. */
     readonly aot?: boolean;
     readonly model?: "rust" | "compiled";
@@ -75,9 +97,7 @@ export interface PocketManifestV2 {
     readonly viewport: ManifestViewport;
     /** Additional UI output intent. Physical geometry remains target-owned. */
     readonly surfaces?: {
-      readonly auxiliary: {
-        readonly fixed: FixedViewportSpec;
-      };
+      readonly auxiliary: AuxiliarySurfaceSpec;
     };
     /**
      * Companion service names the app's svc adapters speak (the exact
@@ -116,9 +136,7 @@ export interface PresentationSpec {
   readonly modality: ModalityRequirement;
   readonly viewport?: ManifestViewport;
   readonly surfaces?: {
-    readonly auxiliary: {
-      readonly fixed: FixedViewportSpec;
-    };
+    readonly auxiliary: AuxiliarySurfaceSpec;
   };
   /** Added to `engine.capabilities`; a presentation `requires` entry may
    *  promote an app-level `enhances` entry. */
@@ -133,6 +151,22 @@ export interface FixedViewportSpec {
   readonly logical: Viewport;
   readonly presentation: PresentationMode;
 }
+
+/**
+ * An auxiliary surface the application lays out at any logical size from
+ * `min` through `max`: the target presents its own auxiliary size when that
+ * size lies in the range, at native presentation. The application reads the
+ * size at run time (`auxiliaryViewport()`).
+ */
+export interface AdaptiveViewportSpec {
+  readonly min: Viewport;
+  readonly max: Viewport;
+}
+
+/** `fixed` requires the target's size; `adaptive` takes it. One of the two. */
+export type AuxiliarySurfaceSpec =
+  | { readonly fixed: FixedViewportSpec; readonly adaptive?: undefined }
+  | { readonly adaptive: AdaptiveViewportSpec; readonly fixed?: undefined };
 
 /** A dynamic-window viewport declaration (window/widget targets). */
 export interface DynamicViewportSpec {
@@ -153,6 +187,29 @@ export type ManifestViewport =
       readonly fixed?: FixedViewportSpec;
       readonly dynamic?: DynamicViewportSpec;
     };
+
+export const animationThemeSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    keyframes: {
+      type: "object", additionalProperties: {
+        type: "object", additionalProperties: {
+          type: "object", additionalProperties: { anyOf: [{ type: "string" }, { type: "number" }] },
+        },
+      },
+    },
+    animation: {
+      type: "object", additionalProperties: {
+        anyOf: [
+          { type: "string" },
+          { type: "object", additionalProperties: false, required: ["value"], properties: {
+            value: { type: "string" }, loop: { anyOf: [{ type: "string" }, { type: "number" }] },
+          } },
+        ],
+      },
+    },
+  },
+} as const satisfies JsonSchema;
 
 const capabilityIdSchema = {
   type: "string",
@@ -184,9 +241,15 @@ const surfacesSchema = {
     auxiliary: {
       type: "object",
       additionalProperties: false,
-      required: ["fixed"],
+      description: "Exactly one of fixed and adaptive (checked at resolution).",
       properties: {
         fixed: fixedViewportSchema,
+        adaptive: {
+          type: "object",
+          additionalProperties: false,
+          required: ["min", "max"],
+          properties: { min: viewportSizeSchema, max: viewportSizeSchema },
+        },
       },
     },
   },
@@ -294,6 +357,7 @@ export const pocketManifestV2Schema = {
         },
       },
     },
+    applet: appletSchema,
     engine: {
       type: "object",
       additionalProperties: false,
@@ -327,6 +391,7 @@ export const pocketManifestV2Schema = {
         entry: entrySchema,
         output: outputSchema,
         framework: { enum: ["solid", "vue-vapor", "octane"] },
+        theme: { anyOf: [animationThemeSchema, { type: "string", minLength: 1 }] },
         aot: { type: "boolean" },
         model: { enum: ["rust", "compiled"] },
         recursionLimit: { type: "integer", minimum: 1, default: 256 },

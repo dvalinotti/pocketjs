@@ -1,6 +1,6 @@
+import { resolveSourceEntry, sourceAppContent, sourceOutputName } from "./source-app.ts";
 import { resolveSolidAotModel } from "../microts/compiler/aot-solid-browser.ts";
 import { modelConfiguration } from "../microts/compiler/aot-model-build.ts";
-import { readIdfHostExtension } from "../framework/src/manifest/idf-host.ts";
 import { BuildInputs } from "../framework/compiler/build-inputs.ts";
 // tools/build.ts <app> — the TWO-PASS app build (docs/DESIGN.md "Build pipeline").
 //
@@ -19,8 +19,6 @@ import { BuildInputs } from "../framework/compiler/build-inputs.ts";
 //
 // Flags:
 //   --framework=solid|vue-vapor|octane  select the framework for this build
-//   --config=<path>              load a Pocket config file (default: pocket.config.ts)
-//   --no-config                  ignore pocket.config.ts
 //   --extra-chars=<string>       force extra codepoints into every atlas
 //   --density=<integer>          low-level target sampling density (default 1)
 //   --font-regular=<path>        override the regular font source
@@ -32,9 +30,9 @@ import { BuildInputs } from "../framework/compiler/build-inputs.ts";
 //                                that does not compile; without it the build
 //                                prints the same finding as a warning
 
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve as resolvePath, join, dirname } from "node:path";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { fileURLToPath } from "node:url";
 import { IMG_FLAG_LINEAR, PSM } from "../contracts/spec/spec.ts";
 import {
   FRAMEWORKS,
@@ -46,8 +44,10 @@ import {
   type LiteralSite,
   type PocketFramework,
 } from "../framework/compiler/jsx-plugin.ts";
-import type { PocketConfig } from "../framework/src/config.ts";
-import { verifyPlanHash, type ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
+import { animationThemeSchema } from "../contracts/spec/pocket-manifest.ts";
+import { validateSchema, type ContractDiagnostic } from "../framework/src/manifest/schema.ts";
+import { verifyPlanHash, verifyPlanProfile, type ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
+import { POCKET_BINDING_GENERATION } from "../contracts/spec/binding-generation.ts";
 import { registerAnimationTheme, setAnimationTickRate } from "../framework/compiler/animation.ts";
 import { compileClasses, generateStylesModule, suspectClassLiteral, unknownUtilities } from "../framework/compiler/tailwind.ts";
 import { bakeAtlases } from "../framework/compiler/bake-font.ts";
@@ -70,6 +70,7 @@ import {
   placeholderImage,
   type PakBlob,
 } from "../framework/compiler/pak.ts";
+import { checkAppletBundle, checkAppletSources, formatAppletDiagnostics } from "./applet-check.ts";
 
 const ROOT = resolvePath(fileURLToPath(new URL("..", import.meta.url))); // pocketjs/
 let DIST = join(ROOT, "dist/");
@@ -91,9 +92,6 @@ let regularFontPath: string | undefined;
 let boldFontPath: string | undefined;
 let appArg = "";
 let frameworkFlag: string | undefined;
-let configPath = join(ROOT, "pocket.config.ts");
-let configFlagged = false;
-let useConfig = true;
 let planPath: string | undefined;
 let densityFlag: number | undefined;
 let hzFlag: number | undefined;
@@ -106,8 +104,9 @@ for (const a of args) {
   else if (a.startsWith("--font-regular=")) regularFontPath = resolvePath(a.slice("--font-regular=".length));
   else if (a.startsWith("--font-bold=")) boldFontPath = resolvePath(a.slice("--font-bold=".length));
   else if (a.startsWith("--framework=")) frameworkFlag = a.slice("--framework=".length);
-  else if (a.startsWith("--config=")) { configPath = resolvePath(ROOT, a.slice("--config=".length)); configFlagged = true; }
-  else if (a === "--no-config") useConfig = false;
+  else if (a === "--config" || a.startsWith("--config=") || a === "--no-config") {
+    throw new Error("PocketJS build: application configuration belongs in pocket.json; --config and --no-config were removed");
+  }
   else if (a.startsWith("--plan=")) planPath = resolvePath(a.slice("--plan=".length));
   else if (a.startsWith("--project-root=")) projectRoot = resolvePath(a.slice("--project-root=".length));
   else if (a.startsWith("--outdir=")) DIST = resolvePath(a.slice("--outdir=".length)) + "/";
@@ -121,8 +120,11 @@ for (const a of args) {
 let buildPlan: ResolvedBuildPlan | undefined;
 if (planPath) {
   buildPlan = await Bun.file(planPath).json() as ResolvedBuildPlan;
-  if (!verifyPlanHash(buildPlan)) {
+  if (!verifyPlanHash(buildPlan) || !verifyPlanProfile(buildPlan)) {
     throw new Error(`PocketJS build: invalid ResolvedBuildPlan checksum in ${planPath}`);
+  }
+  if (buildPlan.target.hostAbi !== POCKET_BINDING_GENERATION) {
+    throw new Error(`PocketJS build: binding generation ${buildPlan.target.hostAbi} is unsupported; rebuild plan for ${POCKET_BINDING_GENERATION}`);
   }
   if (frameworkFlag) {
     throw new Error("PocketJS build: --framework cannot override a ResolvedBuildPlan");
@@ -138,7 +140,6 @@ if (planPath) {
     || model.mode === "compiled" && currentApp.framework !== buildPlan.app.framework) {
     throw new Error("PocketJS build: model settings differ from the ResolvedBuildPlan; resolve a new plan before building");
   }
-  if (!configFlagged) configPath = resolvePath(projectRoot, "pocket.config.ts");
 }
 
 if (!appArg) {
@@ -146,81 +147,25 @@ if (!appArg) {
   process.exit(1);
 }
 
-async function loadConfig(): Promise<PocketConfig> {
-  if (!useConfig || !existsSync(configPath)) return {};
-  const url = pathToFileURL(configPath);
-  url.searchParams.set("mtime", String(statSync(configPath).mtimeMs));
-  const mod = await import(url.href) as { default?: PocketConfig; config?: PocketConfig };
-  return mod.default ?? mod.config ?? {};
-}
-
-function resolveEntry(arg: string): string {
-  const normalized = arg.replace(/\\/g, "/").replace(/\.tsx?$/, "");
-  const bare = normalized.includes("/") ? normalized.slice(normalized.lastIndexOf("/") + 1) : normalized;
-  const isBareName = !arg.includes("/") && !arg.startsWith(".");
-  const demoRel = normalized.replace(/^.*?apps\//, "");
-  const demoName =
-    demoRel.endsWith("/main")
-      ? demoRel.slice(0, -"/main".length)
-      : demoRel.endsWith("/app")
-        ? demoRel.slice(0, -"/app".length)
-        : bare.endsWith("-main")
-          ? bare.slice(0, -"-main".length)
-          : bare;
-  const wantsMain = demoRel.endsWith("/main") || bare.endsWith("-main");
-  const tries = [
-    resolvePath(arg),
-    resolvePath(ROOT, arg),
-    wantsMain ? resolvePath(ROOT, "apps", demoName, "main.tsx") : "",
-    wantsMain ? resolvePath(ROOT, "apps", demoName, "main.ts") : "",
-    !wantsMain ? resolvePath(ROOT, "apps", demoName, "app.tsx") : "",
-    isBareName && !wantsMain ? resolvePath(ROOT, "apps", demoName, "main.tsx") : "",
-    isBareName && !wantsMain ? resolvePath(ROOT, "apps", demoName, "main.ts") : "",
-    resolvePath(ROOT, "apps", arg),
-    resolvePath(ROOT, "apps", arg + ".tsx"),
-    resolvePath(ROOT, "apps", arg + ".ts"),
-  ].filter(Boolean);
-  for (const t of tries) {
-    if (/\.tsx?$/.test(t) && existsSync(t) && statSync(t).isFile()) return t;
-  }
-  console.error(`PocketJS build: cannot resolve app "${arg}" (tried:\n  ${tries.join("\n  ")})`);
-  process.exit(1);
-}
-
-const requestedEntry = resolveEntry(appArg);
-buildInputs.optional(configPath);
-buildInputs.optional(join(dirname(requestedEntry), "pocket.config.ts"));
+const requestedEntry = resolveSourceEntry(appArg, ROOT);
 buildInputs.optional(join(projectRoot, "tsconfig.json"));
-// An app directory can carry its own pocket.config.ts (theme/keyframes local
-// to the app); it wins over the repo root config unless --config was given.
-if (!configFlagged && useConfig) {
-  const appConfig = join(dirname(requestedEntry), "pocket.config.ts");
-  if (existsSync(appConfig)) configPath = appConfig;
-}
-const config = await loadConfig();
-if (buildPlan && config.framework !== undefined) {
-  throw new Error(
-    "PocketJS build: framework belongs to pocket.json in manifest builds; remove it from pocket.config.ts",
-  );
+// The public compiler passes a frozen plan. Low-level source builds read the
+// matching application manifest so they bake the same application theme.
+if (!buildPlan) modelConfiguration(requestedEntry);
+const appContent = buildPlan ? buildPlan.app : sourceAppContent(requestedEntry, {
+  frameworkRoot: ROOT, projectRoot, onRead: path => buildInputs.add(path),
+});
+if (appContent.theme !== undefined) {
+  const diagnostics: ContractDiagnostic[] = [];
+  validateSchema(appContent.theme, animationThemeSchema, "/app/theme", diagnostics);
+  if (diagnostics.length) throw new Error(diagnostics.map(item => `${item.path}: ${item.message}`).join("; "));
 }
 const framework: PocketFramework = frameworkFlag
   ? parseFramework(frameworkFlag, "--framework")
-  : buildPlan
-    ? parseFramework(buildPlan.app.framework, "ResolvedBuildPlan")
-  : parseFramework(config.framework, "pocket.config.ts");
+  : parseFramework(appContent.framework, buildPlan ? "ResolvedBuildPlan" : "pocket.json");
 const frameworkConfig = FRAMEWORKS[framework];
 const entry = frameworkVariantPath(requestedEntry, framework);
-function outputName(file: string): string {
-  const normalizedFile = file.replace(/\\/g, "/");
-  const normalizedRoot = ROOT.replace(/\\/g, "/");
-  const prefix = normalizedRoot.endsWith("/") ? normalizedRoot : normalizedRoot + "/";
-  const rel = normalizedFile.startsWith(prefix) ? normalizedFile.slice(prefix.length) : normalizedFile;
-  const demo = rel.match(/^apps\/([^/]+)\/(app|main)\.tsx?$/);
-  if (demo) return demo[2] === "main" ? `${demo[1]}-main` : demo[1];
-  return normalizedFile.split("/").pop()!.replace(/\.tsx?$/, "");
-}
-
-const appName = buildPlan?.app.output ?? outputName(requestedEntry);
+const appName = buildPlan?.app.output ?? sourceOutputName(requestedEntry, ROOT);
 // A resolved plan names the exact artifact. Low-level demo builds retain the
 // framework suffix so multiple framework variants can coexist in dist/.
 const outName = buildPlan ? appName : `${appName}${frameworkConfig.outputSuffix}`;
@@ -237,15 +182,14 @@ const rasterDensity = buildPlan?.viewport.rasterDensity ?? densityFlag ?? 1;
 
 // Tick rate: the realm's virtual-time step, baked into the bundle because
 // every ms-to-frame conversion in the framework resolves against it. An
-// ESP-IDF host profile owns the rate; low-level builds may still pass --hz.
+// software profile owns the rate; low-level builds may still pass --hz.
 if (hzFlag !== undefined && (!Number.isInteger(hzFlag) || hzFlag < 1 || hzFlag > 240)) {
   throw new Error("PocketJS build: --hz wants an integer from 1 through 240");
 }
-const idfHost = readIdfHostExtension(buildPlan?.hostExtension);
-if (idfHost && hzFlag !== undefined && hzFlag !== idfHost.tickHz) {
-  throw new Error("PocketJS build: --hz cannot override an ESP-IDF host profile");
+if (buildPlan && hzFlag !== undefined && hzFlag !== buildPlan.profile.tickHz) {
+  throw new Error("PocketJS build: --hz cannot override the resolved software profile");
 }
-const tickHz = idfHost?.tickHz ?? hzFlag ?? 60;
+const tickHz = buildPlan?.profile.tickHz ?? hzFlag ?? 60;
 console.log(
   `PocketJS build: ${appName} (${entry}, framework=${framework}` +
     `${tickHz === 60 ? "" : `, ${tickHz}Hz`}` +
@@ -319,14 +263,23 @@ async function walk(file: string): Promise<void> {
   }
 }
 
+// System layers the plan's capabilities bring (framework/src/system-layers.ts):
+// a Solid app that declares "system.agent" gets the agent's overlay. It is
+// walked here so pass 1 compiles its classes and glyphs, and imported ahead
+// of the app's entry in pass 2 so it registers before the app mounts.
+const systemLayers: string[] = [];
+if (framework === "solid" && buildPlan?.features["system.agent"] === true) {
+  systemLayers.push(join(ROOT, "framework/src/agent-layer.tsx"));
+}
 await walk(entry);
+for (const layer of systemLayers) await walk(layer);
 console.log(`  pass 1: ${visited.size} module(s), ${classStrings.length} candidate literal(s), ${codepoints.size} codepoint(s)`);
 
 // ---------------------------------------------------------------------------
 // compile styles + fonts + images
 // ---------------------------------------------------------------------------
 
-registerAnimationTheme(config.theme);
+registerAnimationTheme(appContent.theme);
 // Keyframe timelines are frame-baked; they must count frames at the same
 // rate the realm ticks (transition-* stays in ms and converts at runtime).
 setAnimationTickRate(tickHz);
@@ -547,8 +500,15 @@ console.log(`  pak: ${blobs.length} entries, ${pak.length} bytes -> ${DIST}${out
 // jsxPlugin owns dependency identity as well as framework aliases. In
 // particular, external apps and renderer-solid.ts must share PocketJS's
 // browser-mode Solid runtime even when the app has its own node_modules.
+let bundleEntry = entry;
+if (systemLayers.length > 0) {
+  const entries = join(DIST, ".entries");
+  mkdirSync(entries, { recursive: true });
+  bundleEntry = join(entries, `${outName}.ts`);
+  writeFileSync(bundleEntry, [...systemLayers, entry].map((file) => `import ${JSON.stringify(file)};\n`).join(""));
+}
 const result = await Bun.build({
-  entrypoints: [entry],
+  entrypoints: [bundleEntry],
   root: process.cwd(),
   outdir: DIST,
   naming: `${outName}.js`,
@@ -563,13 +523,16 @@ const result = await Bun.build({
   define: {
     "process.env.NODE_ENV": '"production"',
     __POCKET_TARGET__: JSON.stringify(buildPlan?.target.id ?? ""),
-    __POCKET_HOST_ABI__: String(buildPlan?.target.hostAbi ?? 0),
+    __POCKET_HOST_ABI__: String(buildPlan?.target.hostAbi ?? POCKET_BINDING_GENERATION),
     __POCKET_FEATURES__: JSON.stringify(buildPlan?.features ?? {}),
     // The modality and presentation the plan resolved; the runtime module
     // (@pocketjs/framework/modality) falls back to the portable PSP shape
     // when a bundle is built without a plan.
     __POCKET_MODALITY__: JSON.stringify(buildPlan?.modality ?? null),
     __POCKET_PRESENTATION__: JSON.stringify(buildPlan?.presentation.id ?? "default"),
+    // The animation class the plan derived (contracts/spec/animation.ts);
+    // a bundle built without a plan animates as a composited target.
+    __POCKET_ANIMATION__: JSON.stringify(buildPlan?.animation ?? "composited"),
     __POCKET_PIXEL_RATIO__: String(rasterDensity),
     __POCKET_TICK_HZ__: String(tickHz),
     ...(framework === "vue-vapor"
@@ -593,9 +556,28 @@ if (!result.success) {
 const bundle = result.outputs.find((o) => o.path.endsWith(".js"));
 if (inputsFile) {
   buildInputs.metafile(result.metafile);
-  await buildInputs.compiler([join(ROOT, "tools/build.ts"), join(ROOT, "tools/pocket.ts"),
-    ...(useConfig && existsSync(configPath) ? [configPath] : [])], ROOT);
+  await buildInputs.compiler([join(ROOT, "tools/build.ts"), join(ROOT, "tools/pocket.ts")], ROOT);
   await Bun.write(inputsFile, JSON.stringify(buildInputs.paths(), null, 2) + "\n");
 }
-console.log(`  pass 2: ${DIST}${outName}.js (${bundle ? (await bundle.arrayBuffer()).byteLength : 0} bytes)`);
+const bundleBytes = bundle ? (await bundle.arrayBuffer()).byteLength : 0;
+console.log(`  pass 2: ${DIST}${outName}.js (${bundleBytes} bytes)`);
+// A Pocket Applet's code and bundle meet the applet rules
+// (contracts/spec/applet.ts) or the build fails.
+if (buildPlan?.applet) {
+  const diagnostics = [
+    ...checkAppletSources({
+      projectRoot,
+      entry: buildPlan.app.entry,
+      applet: buildPlan.applet,
+      capabilities: Object.keys(buildPlan.features),
+    }),
+    ...checkAppletBundle({ jsBytes: bundleBytes, pakBytes: pak.length }),
+  ];
+  if (diagnostics.length > 0) {
+    console.error(formatAppletDiagnostics(outName, diagnostics));
+    console.error("PocketJS build: the applet breaks the applet rules (docs/APPLETS.md)");
+    process.exit(1);
+  }
+  console.log("  applet: rules pass");
+}
 console.log("PocketJS build: done");

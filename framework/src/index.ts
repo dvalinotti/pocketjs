@@ -49,9 +49,11 @@ import type { AxisDelta } from "./relative-axis.ts";
 import type { MotionState } from "./motion.ts";
 import { flushLifecycleHooks, flushUnmountedHooks, disposeRootModelRegions } from "./lifecycle-solid-aot.ts";
 import { __resetTouches, __setTouches } from "./touch.ts";
+import { __dispatchTextEvents, __resetTextInput, __setTextEvents, type TextEventRecord } from "./text-input.ts";
 import { __advanceClock, resetClock } from "./clock.ts";
 import { __drainEffects, resetEffects } from "./effects.ts";
 import { runServicePumps } from "./services.ts";
+import { filterFrameInput, mountSystemLayers } from "./system-layers.ts";
 import { entries as pakEntries, get as pakGet, hasPack, loadPack } from "./pak.ts";
 import { STYLE_IDS as DEFAULT_STYLE_IDS } from "./styles.generated.ts";
 import { ENUMS, SCREEN_H, SCREEN_W } from "../../contracts/spec/spec.ts";
@@ -285,12 +287,23 @@ export function render(code: () => unknown, opts: RenderOptions = {}): () => voi
       rightAnalog?: number,
       axisDeltas?: readonly AxisDelta[],
       motion?: MotionState | null,
+      text?: readonly TextEventRecord[],
     ) => {
       __advanceClock(); // virtual frame++, fire due after() timers
+      // A system layer may take the frame's input first (system-layers.ts).
+      const filtered = filterFrameInput(buttons, touches, hits, touchSurfaces);
+      if (filtered !== null) {
+        buttons = filtered.buttons;
+        touches = filtered.touches;
+        hits = filtered.hits;
+        touchSurfaces = filtered.surfaces;
+      }
       __setAnalog(analog, rightAnalog); // latch the nub before any app code reads it
       __setTouches(touches, hits, touchSurfaces); // latch contacts + surface-specific hit facts
+      __setTextEvents(text); // the keyboard's events for this frame
       runServicePumps(); // only modules with pending async work register here
       __drainEffects(); // frame-boundary deliveries enter the world first
+      __dispatchTextEvents(); // typed text lands before button handlers run
       runFrameHooks(buttons, axisDeltas,
         defer => handleFrame(buttons, defer),
         runDeferredGestures, motion);
@@ -299,11 +312,14 @@ export function render(code: () => unknown, opts: RenderOptions = {}): () => voi
   );
 
   const dispose = rendererRender(code as () => NodeMirror, appRoot);
+  const disposeSystemLayers = mountSystemLayers(host.ops);
   flushLifecycleHooks();
   const removeResizeViewportHook = installResizeViewportHook(resizeViewport);
   return () => {
     removeResizeViewportHook();
+    disposeSystemLayers();
     __resetTouches();
+    __resetTextInput();
     resetGestures();
     dispose(); // tears down reactivity only — universal keeps the nodes
     disposeRootModelRegions();

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createSimLocalMedia, type SimLocalTrack } from "../hosts/sim/localmedia.ts";
+import { createSimLocalMedia, type SimLocalTrack } from "../platforms/sim/localmedia.ts";
 import { localMedia } from "../framework/src/localmedia.ts";
 
 const LIB: SimLocalTrack[] = [

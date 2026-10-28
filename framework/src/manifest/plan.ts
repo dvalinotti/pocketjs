@@ -1,15 +1,25 @@
 import type { HostExtension } from "./host-extension.ts";
 import { createHash } from "node:crypto";
+import type { AppletDeclaration } from "../../../contracts/spec/applet.ts";
+import type { AnimationClass } from "../../../contracts/spec/animation.ts";
 import type { Modality } from "../../../contracts/spec/modality.ts";
-import type { PocketManifestV2 } from "../../../contracts/spec/pocket-manifest.ts";
+import type { AnimationTheme, PocketManifestV2 } from "../../../contracts/spec/pocket-manifest.ts";
 import type { PresentationMode, Viewport } from "../../../contracts/spec/platforms.ts";
+import { pocketProfileSchema, type PocketProfile } from "../../../contracts/spec/profile.ts";
+import { canonicalProfileJson, hashPocketProfile } from "../profile.ts";
+import { validateSchema, type ContractDiagnostic } from "./schema.ts";
 
 export interface ResolvedBuildPlanContent {
+  /** Complete software identity used at build time, without host metadata. */
+  readonly profile: Omit<PocketProfile, "hostExtension">;
+  readonly profileHash: string;
   /** Package identity travels with the plan: native hosts derive their
    *  platform package id and version from here, never from a second copy. */
   readonly app: Pick<PocketManifestV2, "id" | "title" | "version"> &
     Pick<PocketManifestV2["app"], "entry" | "framework" | "aot" | "model" | "recursionLimit"> & {
     readonly output: string;
+    /** Theme content; a module reference is loaded before resolution. */
+    readonly theme?: AnimationTheme;
   };
   /** The presentation this build compiles: `app.entry` above IS its entry.
    *  "default" names the baseline `app.entry` when no declared presentation
@@ -46,6 +56,9 @@ export interface ResolvedBuildPlanContent {
    *  (contracts/spec/modality.ts). Consumers read it from the plan, never
    *  from a second copy of the registry. */
   readonly modality: Modality;
+  /** What a changed frame costs the target, derived from its profile
+   *  (contracts/spec/animation.ts). */
+  readonly animation: AnimationClass;
   /** Required APIs are true; enhancements reflect target availability. */
   readonly features: Readonly<Record<string, boolean>>;
   /** Companion service names from the manifest (app.companions): the exact
@@ -54,6 +67,9 @@ export interface ResolvedBuildPlanContent {
   readonly companions: readonly string[];
   /** Versioned, content-verified adapter payload. */
   readonly hostExtension?: HostExtension;
+  /** The manifest's applet section (contracts/spec/applet.ts): the build
+   *  checks the applet's sources and bundle against it. Absent for apps. */
+  readonly applet?: AppletDeclaration;
 }
 
 export interface ResolvedBuildPlan extends ResolvedBuildPlanContent {
@@ -93,4 +109,20 @@ export function finalizeBuildPlan(content: ResolvedBuildPlanContent): ResolvedBu
 export function verifyPlanHash(plan: ResolvedBuildPlan): boolean {
   const { planHash, ...content } = plan;
   return planHash === hashBuildPlanContent(content);
+}
+
+/** A plan checksum alone cannot establish a profile's independent identity. */
+export function verifyPlanProfile(plan: ResolvedBuildPlan): boolean {
+  try {
+    const diagnostics: ContractDiagnostic[] = [];
+    validateSchema(plan.profile, pocketProfileSchema, "/profile", diagnostics);
+    if (diagnostics.length) return false;
+    return /^sha256:[0-9a-f]{64}$/.test(plan.profileHash) &&
+      plan.profile.id === plan.target.id &&
+      !Object.hasOwn(plan.profile, "hostExtension") &&
+      canonicalJson(plan.profile) === canonicalProfileJson(plan.profile) &&
+      hashPocketProfile(plan.profile) === plan.profileHash;
+  } catch {
+    return false;
+  }
 }

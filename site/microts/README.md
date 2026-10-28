@@ -6,7 +6,8 @@ TypeScript models into Rust. Deployed to `microts.pocket.nexus` by the
 `microts` job in `.github/workflows/deploy.yml`.
 
 - **Home**: what you can write, build and run with MicroTS, with the counter
-  from the guide and the Pocket Retro games; picking a game shows its source.
+  from the guide in Solid and in Vue and the Pocket Retro games; picking a
+  framework or a game shows its source.
 - **Docs**: the MicroTS section of `site/nav.ts` plus `typescript-support`,
   rendered at build time from `site/content/docs/` with marked and Shiki. The
   same Markdown files build the pocketjs.dev pages; links to pages this site
@@ -55,7 +56,7 @@ and the router renders the 404 page.
 | `index.html`, `assets/main-*.js`, `assets/chunk-*.js` | `src/`; `.vue` files compile through `@vue/compiler-sfc` in `lib/plugins.ts`; each page, each preset's sources and each game's home page code panel are a separate chunk |
 | `assets/site-*.css` | `src/styles/main.css` through `bunx @tailwindcss/cli`, followed by the SFC `<style>` blocks |
 | `assets/retro-worker.js`, `assets/retro-mixer.js` | the retro game worker and the audio worklet |
-| `pocket/` | the UI preview kit (`lib/kit.ts`): `kit/` compiler worker and preview iframe, the framework subpaths, Vue Vapor and Solid runtimes, `hosts/web/pocketjs.wasm`, Inter |
+| `pocket/` | the UI preview kit (`lib/kit.ts`): `kit/` compiler worker and preview iframe, the framework subpaths, Vue Vapor and Solid runtimes, `platforms/web/pocketjs.wasm`, Inter |
 | `retro/<id>/` | baked assets and a poster frame per game (`lib/retro.ts`) |
 | `shells/` | the playground devices' pictures and their credits (`lib/shells.ts`): `shells/` here and the Pocket3D player's PSP and 3DS |
 | `fonts/`, `pocket3d-mark.svg` | copied from `site/assets/fonts/` and `site/pocket3d/mark.svg` |
@@ -97,7 +98,8 @@ runs it first because `retro` resolves to the generated SDK.
 build.ts, serve.ts     build and dev server
 lib/                   Bun plugins, Markdown rendering, preview kit and Pocket Retro builders
 kit/                   browser compiler and preview runtime, bundled into /pocket/
-content/home/          code snippets shown on the home page; retro.md is the Build tab for every game
+content/home/          code snippets shown on the home page: the counter in Solid and Vue, the Rust main
+                       both share, the start commands; retro.md is the Build tab for every game
 mark.svg               the MicroTS mark; every icon of the site is generated from it
 public/                favicon, icon family and manifest, copied to the site root
 shells/                the devices' pictures and profiles (tools/handheld-shells.ts) and their credits

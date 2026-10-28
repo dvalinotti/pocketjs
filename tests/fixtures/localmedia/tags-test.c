@@ -1,4 +1,4 @@
-#include "../../../hosts/3ds/src/localmedia_tags.h"
+#include "../../../products/3ds/src/localmedia_tags.h"
 #include "check.h"
 
 #include <stdlib.h>

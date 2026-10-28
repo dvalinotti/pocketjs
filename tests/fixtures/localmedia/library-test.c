@@ -1,6 +1,6 @@
 /* Scans each folder given on the command line with one id registry and prints each
  * tracks() JSON on its own line; the first argument is the track cap. */
-#include "../../../hosts/3ds/src/localmedia_library.h"
+#include "../../../products/3ds/src/localmedia_library.h"
 #include "check.h"
 
 #include <stdlib.h>

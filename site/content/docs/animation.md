@@ -2,9 +2,9 @@
 
 PocketJS has three ways to move things:
 
-- **Baked keyframe timelines** — CSS-grade `keyframes` / `animation` choreography
-  authored in `pocket.config.ts` and applied with `animate-<name>` classes. Compiled
-  into binary timelines at build time; the richest option.
+- **Baked keyframe timelines** — `keyframes` and `animation` declared in
+  `pocket.json` under `app.theme` and applied with `animate-<name>` classes.
+  The compiler turns them into binary timelines at build time.
 - **Transition utilities** — Tailwind-subset classes (`transition`, `duration-N`,
   `ease-*`, `delay-N`) that tween a node whenever its style is swapped.
 - **The imperative API** — `animate()`, `spring()` and `cancelAnim()` from
@@ -15,14 +15,14 @@ Rust core owns every frame from there.**
 
 ## How native animation works
 
-Tweens and springs tick in the Rust core, one step per `tick()`. The step is
-**`dt = 1 / tickHz`**, and `tickHz` is a per-realm declaration, not the constant
-60: `engine/core/src/lib.rs` defaults to `DEFAULT_TICK_HZ` 60 and caps at
-`MAX_TICK_HZ` 240, `tools/build.ts --hz=N` bakes the rate into the bundle
-(1 through 240), and `Ui::set_tick_rate` is refused once the first `tick()` has
-run. So `dt` is constant for a whole run, whatever its rate. Durations you write
-are milliseconds and convert against `tickHz`, so a `dur: 700` tween lasts 700 ms
-at 60 Hz and at 120 Hz. See [Architecture](/docs/architecture/) for the clock.
+Tweens and springs tick in the Rust core, one step per `tick()`. **The step is
+`dt = 1 / tickHz`, with `tickHz` declared by the selected profile.** Application
+compilation bakes that rate into the animation tables; the runtime uses the same
+rate to advance them. The core accepts 1 through 240 Hz and refuses
+`Ui::set_tick_rate` after the first tick, so the step stays constant for a run.
+Durations are written in milliseconds and converted against `tickHz`: a
+`dur: 700` tween lasts 700 ms at 60 Hz and at 120 Hz. See
+[Architecture](/docs/architecture/) for the clock.
 
 Two consequences:
 
@@ -183,34 +183,46 @@ for how focus moves between nodes.
 
 ## Baked keyframe timelines
 
-For anything richer than a single tween — multi-stop choreography, staggered
-sequences, loops — author `keyframes` and `animation` in `pocket.config.ts`, in the
-exact shape of a `tailwind.config.js` theme:
+For multi-stop animations, staggered sequences and loops, declare `keyframes`
+and `animation` in **`pocket.json` → `app.theme`**. The fields use the Tailwind
+keyframe and animation shape:
 
-```ts
-// apps/<app>/pocket.config.ts
-import { definePocketConfig } from "@pocketjs/framework/config";
-
-export default definePocketConfig({
-  theme: {
-    keyframes: {
-      "menu-open":  { from: { width: 38 }, "60%": { width: 144 }, to: { width: 141 } },
-      "menu-close": { from: { width: 141 }, "60%": { width: 31 }, to: { width: 38 } },
-    },
-    animation: {
-      "menu-pill": {
-        value: "menu-open 0.6s ease-in-out 0.2s both, menu-close 0.6s ease-in-out 1.2s forwards",
-        loop: "4000ms",
+```json
+{
+  "app": {
+    "theme": {
+      "keyframes": {
+        "menu-open":  { "from": { "width": 38 }, "60%": { "width": 144 }, "to": { "width": 141 } },
+        "menu-close": { "from": { "width": 141 }, "60%": { "width": 31 }, "to": { "width": 38 } }
       },
-    },
-  },
-});
+      "animation": {
+        "menu-pill": {
+          "value": "menu-open 0.6s ease-in-out 0.2s both, menu-close 0.6s ease-in-out 1.2s forwards",
+          "loop": "4000ms"
+        }
+      }
+    }
+  }
+}
 ```
 
-An app directory's own `pocket.config.ts` wins over the repo-root one. Keep the
-theme in it and nothing else: a `framework` key makes a manifest build throw
-`framework belongs to pocket.json in manifest builds`, because the app's
-`pocket.json` owns that choice.
+`app.theme` may instead name a module, relative to `pocket.json`:
+
+```json
+{ "app": { "theme": "./theme.ts" } }
+```
+
+The module's default export is the same object, so easing constants, loop
+periods and helpers that derive keyframes stay in TypeScript. **`pocket
+compile` loads the module before it resolves the build plan**, embeds the
+loaded object in the package's manifest, and lists the module and its
+relative imports in the depfile. A `.json` path is read the same way.
+
+The theme belongs to the application manifest. The selected profile supplies
+`tickHz`; `pocket.runtime-config.ts` selects that profile and can declare the
+program's native build. Both guest compilation and `pocket compile --aot` bake
+the theme at the profile's tick rate. See [Frameworks](/docs/frameworks/#manifest-selection)
+for profile selection.
 
 ```tsx
 <View class="w-[38] h-[38] rounded-[19px] bg-white overflow-hidden animate-menu-pill" />
@@ -325,6 +337,36 @@ primitive, no SVG path renderer required:
 All three are animatable (timelines and `animate()`), which is how the Motion
 Lab reload study reproduces SVG `stroke-dasharray` drawing: the compiler samples
 the dash motion into `arcStart`/`arcSweep` keyframe stops.
+
+## Animation classes
+
+A GPU composes a frame from retained geometry, so a tween costs the same
+whatever it moves. A CPU rasterizer repaints the pixels a tween changes,
+so a `scale` over the whole page costs the whole page every frame, while a
+`translateX` of an opaque page is a pixel move. `animationClass` names
+which of the two this bundle runs on, from the target profile the plan
+resolved (see [Platform contracts](/docs/platform-contracts/#animation-classes)):
+
+```ts
+import { animate, animationClass, jump } from "@pocketjs/framework/animation";
+
+const launch = (board: NodeMirror, icon: NodeMirror) => {
+  if (animationClass === "composited") {
+    animate(board, "scale", 1.6, { dur: 260, easing: "in" });
+    animate(board, "opacity", 0, { dur: 260, easing: "in" });
+  } else {
+    // One icon's area, then a cut.
+    animate(icon, "scale", 1.12, { dur: 120, easing: "out" });
+  }
+};
+```
+
+On a `repaint` target, keep tweens to translations of opaque regions and to
+changes inside a small area; replace a `scale`, `opacity` or `rotate` tween
+over a large subtree with a cut; and run nothing while nothing happens. On
+a `still` target (electronic paper) `animate()` and `spring()` set the end
+value at once and return `0`, so a page written for the other classes shows
+its end states without a branch.
 
 ## Which props animate where
 

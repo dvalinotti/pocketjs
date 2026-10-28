@@ -13,6 +13,7 @@
 import type { AxisDelta } from "./relative-axis.ts";
 import { __takeAxisDeltas, EMPTY_AXIS_DELTAS } from "./relative-axis.ts";
 import { __copyMotionState, __takeMotionState, type MotionState } from "./motion.ts";
+import type { TextEventRecord } from "./text-input.ts";
 import { ANALOG_CENTER } from "../../contracts/spec/spec.ts";
 import type { HostOps } from "./host.ts";
 import { rootMirror, setTreeMutationHook, type NodeMirror } from "./native-tree.ts";
@@ -229,7 +230,7 @@ const state: DevtoolsState = {
  * Install the shim for this mount. Called by render() after the host is
  * up. Transport resolution order: an injected `globalThis.
  * __pocketDevtoolsTransport` (browser host, tests, tools/tape.ts), else
- * the PSP mailbox bindings on the ui namespace (hosts/psp/src/dbg.rs).
+ * the PSP mailbox bindings on the ui namespace (programs/psp/src/dbg.rs).
  */
 export function initDevtools(ops: HostOps): void {
   // QuickJS (Solid path) ships no console at all — app code calling
@@ -304,6 +305,7 @@ export function wrapFrameHandler(
     rightAnalog?: number,
     axisDeltas?: readonly AxisDelta[],
     motion?: MotionState | null,
+    text?: readonly TextEventRecord[],
   ) => void,
 ): (
   buttons: number,
@@ -314,6 +316,7 @@ export function wrapFrameHandler(
   rightAnalog?: number,
   axisDeltas?: readonly AxisDelta[],
   motion?: MotionState | null,
+  text?: readonly TextEventRecord[],
 ) => void {
   return (
     buttons: number,
@@ -324,6 +327,7 @@ export function wrapFrameHandler(
     rightAnalogArg?: number,
     axisDeltasArg?: readonly AxisDelta[],
     motionArg?: MotionState | null,
+    textArg?: readonly TextEventRecord[],
   ) => {
     state.hostCalls++;
     if (state.transport) {
@@ -382,7 +386,7 @@ export function wrapFrameHandler(
     recordMask(mask, analog, touch, touchSurfaces, rightAnalog, axisDeltas, motion);
     state.frame++;
     try {
-      h(mask, analog, touch, hits, touchSurfaces, rightAnalog, axisDeltas, motion);
+      h(mask, analog, touch, hits, touchSurfaces, rightAnalog, axisDeltas, motion, textArg);
     } catch (e) {
       send({
         t: "error",

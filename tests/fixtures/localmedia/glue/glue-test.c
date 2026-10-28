@@ -1,4 +1,4 @@
-/* The media.local glue (hosts/3ds/src/localmedia.c) on the host: real threads,
+/* The media.local glue (products/3ds/src/localmedia.c) on the host: real threads,
  * mail slots and status, the fake NDSP and core textures of glue-fake.c, and a
  * music folder (LOCALMEDIA_ROOT, a long path) holding a.mp3 (cbr-info), b.mp3 (cbr-plain),
  * art.mp3 (tagged-v23), junk.mp3 (no frames), short.mp3 (the first 11 frames of cbr-plain),
