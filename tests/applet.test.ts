@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { APPLET_BUDGET, appletManifestDiagnostics, type AppletDeclaration } from "../contracts/spec/applet.ts";
 import type { PocketManifestV2 } from "../contracts/spec/pocket-manifest.ts";
+import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
 import { validatePocketManifest } from "../framework/src/manifest/validate.ts";
 import { resolve3dsBuildPlan } from "../tools/3ds-profile.ts";
 import { checkApplet, checkAppletBundle, checkAppletSources } from "../tools/applet-check.ts";
@@ -22,7 +23,6 @@ function manifest(overrides: Record<string, unknown> = {}, capabilities?: { requ
     $schema: "https://pocketjs.dev/schema/pocket-2.json",
     pocket: 2,
     id: "dev.example.notes",
-    name: "notes",
     title: "Notes",
     version: "0.1.0",
     applet: { version: 1 },
@@ -52,11 +52,14 @@ describe("manifest rules", () => {
     expect(codes(app)).toEqual([]);
   });
 
-  test("the schema refuses an unknown key, a version other than 1 and a bad host", () => {
+  test("the schema refuses an unknown key and a version other than 1", () => {
     expect(validatePocketManifest(manifest({ applet: { version: 1, cookies: true } })).ok).toBe(false);
     expect(validatePocketManifest(manifest({ applet: { version: 2 } })).ok).toBe(false);
-    expect(validatePocketManifest(manifest({ applet: { version: 1, hosts: ["http://x.com"] } })).ok).toBe(false);
-    expect(validatePocketManifest(manifest({ applet: { version: 1, hosts: ["api.example.com"], services: ["glyphs"] } })).ok).toBe(true);
+    expect(validatePocketManifest(manifest({ applet: { version: 1, hosts: ["api.example.com"] } })).ok).toBe(false);
+    expect(validatePocketManifest(manifest({ applet: { version: 1, services: ["glyphs"] } })).ok).toBe(true);
+    expect(validatePocketManifest(manifest({ applet: { version: 1, summary: "The front page and its threads." } })).ok).toBe(true);
+    expect(validatePocketManifest(manifest({ applet: { version: 1, summary: "" } })).ok).toBe(false);
+    expect(validatePocketManifest(manifest({ applet: { version: 1, summary: "x".repeat(121) } })).ok).toBe(false);
   });
 
   test("system capabilities, a missing agent, a long title and a wrong surface are refused", () => {
@@ -71,20 +74,67 @@ describe("manifest rules", () => {
     expect(codes({ ...wide, app: { ...wide.app, companions: ["youtube"] } } as PocketManifestV2)).toContain("applet.companions");
   });
 
-  test("storage needs applet.store, network declarations need net.http, cameras are allowed", () => {
+  test("storage needs applet.store, services need net.http, cameras are allowed", () => {
     const requires = ["display.auxiliary", "input.touch.auxiliary"];
+    expect(codes(manifest({ applet: { version: 1, services: ["x"] } }))).toContain("applet.network");
+    expect(codes(manifest({ applet: { version: 1, services: ["x"] } }, { requires: [...requires, "net.http"] }))).toEqual([]);
     expect(codes(manifest({}, { requires: [...requires, "data.fs"] }))).toContain("applet.store");
     expect(codes(manifest({ applet: { version: 1, store: { maxBytes: 65536 } } }, { requires: [...requires, "data.fs"] }))).toEqual([]);
-    expect(codes(manifest({ applet: { version: 1, services: ["x"] } }))).toContain("applet.network");
     expect(codes(manifest({}, { requires: [...requires, "camera.photo"] }))).toEqual([]);
   });
 
   test("plan resolution refuses a broken applet and carries a passing one's section", () => {
     expect(() => resolve3dsBuildPlan(manifest({}, { enhances: ["system.agent", "system.wifi"] }))).toThrow(/system.wifi is not available to applets/);
-    const plan = resolve3dsBuildPlan(manifest({ applet: { version: 1, services: ["glyphs"] } }, {
-      requires: ["display.auxiliary", "input.touch.auxiliary", "net.http"],
+    const plan = resolve3dsBuildPlan(manifest({ applet: { version: 1, store: { maxBytes: 65536 } } }, {
+      requires: ["display.auxiliary", "input.touch.auxiliary", "data.fs"],
     }));
-    expect(plan.applet).toEqual({ version: 1, services: ["glyphs"] });
+    expect(plan.applet).toEqual({ version: 1, store: { maxBytes: 65536 } });
+  });
+});
+
+describe("the full-screen presentation", () => {
+  const FULL_SCREEN = {
+    id: "full-screen",
+    entry: "notes/main.tsx",
+    modality: { screens: 1, touch: "none", buttons: true },
+    viewport: { fixed: { logical: [480, 272], presentation: "native" } },
+  };
+  const both = (app: Record<string, unknown> = {}, capabilities?: { requires?: string[]; enhances?: string[] }) => {
+    const base = manifest({}, {
+      requires: capabilities?.requires ?? ["text.glyphs.baked", "input.buttons"],
+      enhances: capabilities?.enhances ?? ["system.agent", "display.auxiliary", "input.touch.auxiliary", "input.analog.left"],
+    });
+    return { ...base, app: { ...base.app, modality: { touch: "auxiliary" }, presentations: [FULL_SCREEN], ...app } } as unknown as PocketManifestV2;
+  };
+
+  test("one program serves the touch surface and the full screen", () => {
+    expect(codes(both())).toEqual([]);
+    const psp = validateAndResolveBuildPlan(both(), { target: "psp" });
+    if (!psp.ok) throw new Error(psp.diagnostics.map((d) => d.message).join("; "));
+    expect(psp.plan.presentation).toEqual({ id: "full-screen", entry: "notes/main.tsx" });
+    expect(psp.plan.app.entry).toBe("notes/main.tsx");
+    expect(psp.plan.surfaces?.auxiliary).toBeUndefined();
+    const dual = resolve3dsBuildPlan(both());
+    expect(dual.presentation).toEqual({ id: "default", entry: "notes/main.tsx" });
+    expect(dual.surfaces?.auxiliary?.logical).toEqual([320, 240]);
+  });
+
+  test("a second program, another modality, a surface or a new output is refused", () => {
+    expect(codes(both({ presentations: [{ ...FULL_SCREEN, entry: "notes/psp.tsx" }] }))).toContain("applet.presentationEntry");
+    expect(codes(both({ presentations: [{ ...FULL_SCREEN, modality: { screens: 1, touch: "primary" } }] }))).toContain("applet.presentationModality");
+    const surfaces = { auxiliary: { fixed: { logical: [320, 240], presentation: "native" } } };
+    expect(codes(both({ presentations: [{ ...FULL_SCREEN, surfaces }] }))).toContain("applet.presentationSurfaces");
+    expect(codes(both({ presentations: [{ ...FULL_SCREEN, output: "notes-psp" }] }))).toContain("applet.presentationOutput");
+    expect(codes(both({ presentations: [FULL_SCREEN, { ...FULL_SCREEN, id: "again" }] }))).toContain("applet.presentations");
+  });
+
+  test("the baseline keeps the touch surface: its modality, enhanced surface capabilities, required buttons", () => {
+    expect(codes(both({ modality: undefined }))).toContain("applet.baselineModality");
+    expect(codes(both({}, { requires: ["text.glyphs.baked", "input.buttons", "display.auxiliary"], enhances: ["system.agent", "input.touch.auxiliary"] }))).toContain("applet.surfaceEnhanced");
+    expect(codes(both({}, { requires: ["text.glyphs.baked"] }))).toContain("applet.buttons");
+    // Without the presentation, the v1 rule stands: the surface is required.
+    const touchOnly = manifest({}, { requires: ["text.glyphs.baked", "input.buttons"], enhances: ["system.agent", "display.auxiliary", "input.touch.auxiliary"] });
+    expect(codes(touchOnly)).toContain("applet.required");
   });
 });
 
@@ -102,32 +152,21 @@ const CLEAN = {
   "notes/app.tsx": [
     `import { createSignal } from "solid-js";`,
     `import { AuxiliarySurface, Text } from "@pocketjs/framework/components";`,
-    `import { companionService } from "@pocketjs/framework/link";`,
-    `import { fetch } from "@pocketjs/framework/net";`,
     `import { label } from "../ui/label.ts";`,
-    `// a comment naming https://not-declared.example.com does not count`,
     `export default function App() {`,
     `  const [text] = createSignal(label);`,
-    `  void fetch(companionService("glyphs", "/atlas"));`,
-    `  void fetch("https://api.example.com/notes");`,
     `  return <AuxiliarySurface><Text>{text()}</Text></AuxiliarySurface>;`,
     `}`,
   ].join("\n"),
   "ui/label.ts": `export const label = <T,>(value: T): T => value;\n`,
 };
-const DECLARED: AppletDeclaration = { version: 1, services: ["glyphs"], hosts: ["api.example.com"] };
-const sources = (dir: string, applet = DECLARED, capabilities = ["net.http"]) =>
+const DECLARED: AppletDeclaration = { version: 1 };
+const sources = (dir: string, applet = DECLARED, capabilities: string[] = []) =>
   checkAppletSources({ projectRoot: dir, entry: "notes/main.tsx", applet, capabilities }).map((d) => d.code);
 
 describe("source rules", () => {
-  test("a clean applet passes: shared modules in the project, declared service and host", () => {
+  test("a clean applet passes: shared modules in the project", () => {
     expect(sources(project(CLEAN))).toEqual([]);
-  });
-
-  test("undeclared services and hosts are named", () => {
-    const dir = project(CLEAN);
-    expect(sources(dir, { version: 1, services: [], hosts: ["api.example.com"] })).toEqual(["applet.service"]);
-    expect(sources(dir, { version: 1, services: ["glyphs"], hosts: [] })).toEqual(["applet.host"]);
   });
 
   test("eval, Function, dynamic import, other packages, launcher exports and gated modules are refused", () => {
@@ -147,8 +186,36 @@ describe("source rules", () => {
       expect(found).toContain(code);
     }
     // camera is gated, not forbidden.
-    const withCamera = checkAppletSources({ projectRoot: dir, entry: "notes/main.tsx", applet: DECLARED, capabilities: ["net.http", "camera.photo"] });
+    const withCamera = checkAppletSources({ projectRoot: dir, entry: "notes/main.tsx", applet: DECLARED, capabilities: ["camera.photo"] });
     expect(withCamera.filter((d) => d.message.includes("camera"))).toEqual([]);
+  });
+
+  test("worker/channels, the UI's side of the applet's worker, comes with net.http", () => {
+    const dir = project({
+      ...CLEAN,
+      "notes/net.ts": `import { worker } from "@pocketjs/framework/worker/channels";\nexport const requests = () => worker.channel("request");\n`,
+      "notes/main.tsx": `import "./net.ts";\n${CLEAN["notes/main.tsx"]}`,
+    });
+    const refused = checkAppletSources({ projectRoot: dir, entry: "notes/main.tsx", applet: DECLARED, capabilities: [] });
+    expect(refused.map((d) => [d.code, d.message])).toEqual([["applet.module", "@pocketjs/framework/worker/channels needs the net.http capability"]]);
+    expect(sources(dir, { version: 1, services: ["glyphs"] }, ["net.http"])).toEqual([]);
+    // The build checks with the plan's features: an applet that requires
+    // net.http and declares its worker resolves with the feature on.
+    const plan = resolve3dsBuildPlan(manifest({
+      applet: { version: 1, services: ["glyphs"] },
+      domains: {
+        worker: {
+          entry: "notes/worker.ts",
+          nodes: [{ name: "http", kind: "http" }],
+          channels: [
+            { name: "request", kind: "ring", direction: "ui-to-worker", recordBytes: 1024, capacity: 4 },
+            { name: "response", kind: "ring", direction: "worker-to-ui", recordBytes: 1024, capacity: 8 },
+          ],
+        },
+      },
+    }, { requires: ["text.glyphs.baked", "input.buttons", "display.auxiliary", "input.touch.auxiliary", "net.http"] }));
+    expect(plan.domains?.worker?.nodes).toEqual([{ name: "http", kind: "http" }]);
+    expect(sources(dir, plan.applet, Object.keys(plan.features))).toEqual([]);
   });
 
   test("a module outside the project root and a UI without AuxiliarySurface are refused", () => {
@@ -170,6 +237,6 @@ describe("budgets and the shipped applets", () => {
   });
 
   test("Pocket Nexus is an applet and passes", () => {
-    expect(checkApplet({ manifestPath: join(ROOT, "apps/nexus/pocket.json"), projectRoot: ROOT })).toEqual([]);
+    expect(checkApplet({ manifestPath: join(ROOT, "apps/nexus/pocket.app.json"), projectRoot: ROOT })).toEqual([]);
   });
 });

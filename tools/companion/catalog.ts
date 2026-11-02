@@ -100,7 +100,8 @@ function scanFile(path: string, mtimeMs: number, size: number): ScannedFile {
       const identity = decodeIdentity(identityBytes);
       variants.push({ target: variant.target, ...identity });
     }
-    const summary = typeof manifest.summary === "string" ? manifest.summary : typeof manifest.description === "string" ? manifest.description : "";
+    const applet = manifest.applet as { summary?: unknown } | undefined;
+    const summary = typeof applet?.summary === "string" ? applet.summary : typeof manifest.summary === "string" ? manifest.summary : typeof manifest.description === "string" ? manifest.description : "";
     return {
       ...base,
       hash,
@@ -249,6 +250,13 @@ export class AppCatalog {
       .map((v) => v.entry)
       .sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id))
       .slice(0, LINK_CATALOG_MAX_APPS);
+  }
+
+  /** The targets the packages carry variants for. */
+  targets(): string[] {
+    const targets = new Set<string>();
+    for (const file of this.files.values()) if (!file.error) for (const variant of file.variants) targets.add(variant.target);
+    return [...targets];
   }
 
   apps(target: string): LinkCatalogApp[] {

@@ -69,39 +69,46 @@ pocketjs_embed_package(
     PROFILE_EXPORT_DIR "../profile-export")
 ```
 
-The firmware root contains `pocket.runtime-config.ts`, which imports the
-program's `defineProfile()` module. Generate the trusted profile before an
-offline build:
+The firmware root contains `pocket.host.config.ts`, the host config that
+names the program's host contract, `pocket.host.json`. Export the host contract
+before an offline build:
 
 ```sh
-pocket profile export --config pocket.runtime-config.ts --out profile-export
+pocket host export --config pocket.host.config.ts --out profile-export
 ```
 
 **The embed step uses Python and prebuilt artifacts; it does not invoke Bun.**
-The sidecar's exact canonical JSON, binding generation and profile hash must
-match the package. The generated `pocketjs_package_dashboard.h` exports package
+It reads the exported `pocket.host.json`, requires its `hostAbi` stamp to
+equal the package's binding generation, and admits the package's host-input
+variant by the [admission](/docs/platform-contracts/#admission) rules: raster
+density, animation class, rate against the cadences, viewport, presentation
+and capabilities. The generated `pocketjs_package_dashboard.h` exports package
 storage and admitted application geometry. `pocket_profile.h` supplies the
-independent program configuration.
+program's host contract facts, independent of the package.
 
-`pocketjs_compile_app(TARGET <target> NAME <name> MANIFEST <file>)` compiles an
-application and exports the profile. `pocketjs_profile_header(TARGET <target>
-NAME <name>)` exports the profile without an application. These two helpers
-require the Pocket CLI. Their dependency files track application imports and
-profile/configuration imports, including new modules learned on a rebuild.
+`pocketjs_compile_app(TARGET <target> NAME <name> MANIFEST <pocket.app.json>)`
+compiles an application and exports the host contract.
+`pocketjs_profile_header(TARGET <target> NAME <name>)` exports the host contract
+without an application. These two helpers require the Pocket CLI. Their
+dependency files track application imports, host contracts and host config
+imports, including new modules learned on a rebuild.
 
-All three helpers accept `RUNTIME_CONFIG`, defaulting to the project root's
-`pocket.runtime-config.ts`. `PROFILE_EXPORT_DIR` defaults to
+All three helpers accept `HOST_CONFIG`, defaulting to the project root's
+`pocket.host.config.ts`. `PROFILE_EXPORT_DIR` defaults to
 `<current-binary-directory>/pocketjs/<name>/profile`. Offline embedding requires
-`pocket-profile.json` and `pocket_profile.h` to exist there before configuration.
+`pocket.host.json` and `pocket_profile.h` to exist there before configuration.
 
 ## Register a runtime
 
 **`pocket_runtime_config.profile` points at `pocket_profile.facts`**, the
 `pocket_profile_facts` record in the exported `pocket_profile.h`: variant id,
-tick rate, panel sizes, logical viewports, raster density and the input classes
-the profile requires. The runtime copies the record at creation and reads no
-JSON. `pocket_runtime_create` returns `NULL` when `tick_hz` differs from the
-facts' tick rate. The CMake helpers add the `pocket_runtime` include directory,
+cadences, panel sizes, logical viewports, presentations, raster density,
+animation class, capability names and the input classes the host contract requires.
+The runtime copies the record at creation and reads no JSON.
+`pocket_runtime_create` returns `NULL` when the configuration's `tick_hz`
+differs from the facts' `tick_hz`, the highest cadence. After boot,
+`pocket_runtime_get_timing` reports the package rate, the cadence to schedule
+`pocket_runtime_tick` at, and the core ticks each call advances. The CMake helpers add the `pocket_runtime` include directory,
 which holds the `pocket_runtime.h` that `pocket_profile.h` includes.
 
 The following setup uses an initialized display adapter. Error handling must
@@ -140,6 +147,11 @@ pocket_memory_package package = {
 };
 ```
 
+The runtime reads the package in place, so the bytes stay unchanged until the
+runtime is destroyed. A program that verified the package itself, through
+`pocket_idf_package_open`, sets `.flags = POCKET_MEMORY_PACKAGE_VERIFIED` and
+the runtime admits it without a second hash pass.
+
 Check creation results, then check each registration result against
 `POCKET_STATUS_OK`:
 
@@ -152,12 +164,21 @@ pocket_runtime_add_display(runtime, pocket_display_esp_lcd_vtable(), display,
 
 Register each input device with `pocket_runtime_add_input_source`. Its
 `pocket_input_source_v1` declares input classes and contributes device facts
-during polling. Every input class required by the profile must be present.
+during polling. Every input class required by the host contract must be present.
 The runtime resolves contact hits and encodes the guest frame arguments.
 
 `pocket_runtime_boot` validates the package, installs its assets, evaluates the
-guest and presents the initial tree. `pocket_runtime_tick` runs one guest frame,
-advances the core and presents. A returned display or renderer failure has
+guest and presents the initial tree. A package built for a host contract that
+names `esp-idf-quickjs-ng-0.14.0` under `bytecode.engine` carries its bundles
+as that engine's serialized objects, which the guest reads instead of parsing
+source (docs/PLATFORM.md, "Bytecode"). The baked font atlases of a package the
+runtime reads in place stay in the package: their coverage cells are read from
+flash or PSRAM where they are, and a slot is copied only when a streaming font
+writes into it. Its images and sprites are decoded into PSRAM when first drawn;
+`pocket_runtime_set_texture_budget` bounds the decoded bytes kept past a frame,
+releasing the least recently drawn textures beyond it until a frame draws them
+again. `pocket_runtime_tick` runs one guest frame,
+advances the core by the package rate divided by the cadence, and presents. A returned display or renderer failure has
 terminated all device access for that frame. A guest failure stops further
 turns; read `pocket_guest_idf_error` for engine diagnostics.
 
@@ -195,9 +216,10 @@ separate from display pixel storage.
 
 ## Scheduling and destruction
 
-A product can call `pocket_runtime_tick` from its owner task. The optional
-`pocket_runner_start` takes the booted runtime, tick rate and task configuration.
-It uses the shared rational-microsecond schedule. Falling behind can skip wall
+A product can call `pocket_runtime_tick` from its owner task at the cadence
+`pocket_runtime_get_timing` reports. The optional `pocket_runner_start` takes
+the booted runtime, the task configuration and an output pointer; it schedules
+ticks at that cadence with the shared rational-microsecond schedule. Falling behind can skip wall
 clock slots without inventing guest frames.
 
 Set the runner's interrupt callback to `pocket_guest_idf_interrupt` through a

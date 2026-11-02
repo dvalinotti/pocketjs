@@ -12,7 +12,8 @@ in exactly one capability: **who measures and shapes text**.
 The portable backend is the baked-text pipeline every fixed-function host
 shares: `pocket-ui-wgpu` on the desktop, the core software rasterizer
 (`engine/raster/src/lib.rs`) behind the wasm, Apple, PocketBook and sim
-hosts, the PSP GE walker, the ESP32-P4 PPA and Symbian GLES2 ports.
+hosts, the PSP GE walker, the ESP32-P4 PPA, the SiFli EPIC executor and
+Symbian GLES2 ports.
 
 - **Text is baked at compile time.** `framework/compiler/bake-font.ts`
   rasterizes the app's collected codepoints into FONT ATLAS v3 blobs; the
@@ -50,7 +51,7 @@ window thread has not consumed the previous output. Surface loss/outdated errors
 exit with an error. Production presentation performs no framebuffer readback.
 
 The WASM host retains `engine/present/src/compositor.rs` and the software rasterizer.
-Vita/GXM and 3DS/PICA retain their own DrawList adapters and capability profiles;
+Vita/GXM and 3DS/PICA retain their own DrawList adapters and host contracts;
 wgpu is not added to their dependency graph. Desktop composition support does
 not admit that capability on handheld targets.
 `text.layout.offload` wraps, shapes and rasterizes text using explicit package
@@ -134,10 +135,10 @@ note does (pure-math unit tests over an injected measurer, sim traces,
 
 ## Native desktop targets
 
-`profiles/macos-app.ts` and `profiles/linux-app.ts` declare `form: "window"`,
+`hosts/macos-app/pocket.host.json` and `hosts/linux-app/pocket.host.json` declare `form: "window"`,
 a dynamic viewport and `acceptsFixed`. **Both use the shared binding
 generation 12.**
-Both profiles use the same generic host. macOS resolves density 2; Linux
+Both targets use the same generic host. macOS resolves density 2; Linux
 resolves density 1. Fixed-viewport console apps run size-locked and
 letterboxed with their baked glyph pipeline intact.
 
@@ -147,7 +148,7 @@ bun run macos hero        # fixed 480x272, size-locked, baked glyphs
 bun run macos note --proof
 ```
 
-`tools/macos.ts` resolves the manifest against `macos-app`, writes the
+`tools/macos.ts` resolves the app contract against `macos-app`, writes the
 plan, builds the bundle + pak, and derives the capability-shaped host flags
 (`--fixed`, `--companions`) from the resolved plan. If the
 selected app directory also contains `pocket.system.json`, the tool
@@ -155,7 +156,7 @@ resolves every installed package and starts the host with one complete
 `ResolvedSystemPlan`; it does not project child plans into command-line
 viewport or title fields.
 `--editor` is NOT a capability: it enables the note's companion svc adapter
-(an app protocol — the profile deliberately registers no
+(an app protocol — the `macos-app` host contract registers no
 pointer/text/IME/clipboard ids, see contracts/spec/platforms.ts). The host renders only when the DrawList or retained raster revision changes.
 
 ## Browser System host
@@ -242,7 +243,7 @@ X,Y[,d|u|r]@TICK` (drags, right clicks), `--key
 
 |                    | portable                                                         | legacy gpui                                        |
 | ------------------ | ---------------------------------------------------------------- | ------------------------------------------- |
-| hosts              | PSP, Vita, PocketBook, ESP32-P4, Symbian, web, sim, macOS widget, macOS/Linux desktop | optional crate, no stock host           |
+| hosts              | PSP, Vita, PocketBook, ESP32-P4, SiFli SF32LB5x, Symbian, web, sim, macOS widget, macOS/Linux desktop | optional crate, no stock host           |
 | text measurement   | core, atlas advance tables                                       | gpui platform text system, per-app opt-in   |
 | codepoint coverage | baked charset (+ runtime extension)                              | OS fallback chain, color emoji              |
 | pixel determinism  | byte-exact across hosts                                          | per-host; transactions still deterministic  |

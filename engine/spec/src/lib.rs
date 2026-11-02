@@ -379,7 +379,7 @@ pub mod tileset {
     pub const FLAG_LINEAR: u16 = 2;
 }
 
-/// Host service channel limits (spec.ts SVC — pocket-svc/<app>/ mailbox).
+/// Host service channel limits (spec.ts SVC — `pocket-svc/<app>/` mailbox).
 pub mod svc {
     pub const POLL_BUF: usize = 8192;
     pub const IMG_MAX_BYTES: usize = 131072;
@@ -455,7 +455,7 @@ pub mod font_atlas {
     pub const FLAG_BOLD: u8 = 1;
 }
 
-/// DrawList op codes (core -> backend Vec<u32> words; layout in spec.ts).
+/// DrawList op codes (core -> backend `Vec<u32>` words; layout in spec.ts).
 /// Word counts incl. header: RECT 4, GRAD_RECT 6, GLYPH_RUN 3+2n,
 /// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,
 /// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9.
@@ -474,7 +474,7 @@ pub mod draw_op {
 }
 
 /// .pak container constants (byte-compatible with dreamcart's format;
-/// copied from framework/bake/pak.ts + docs/pak-format.md).
+/// implemented by framework/compiler/pak.ts and framework/src/pak.ts).
 pub mod pak {
     pub const MAGIC: u32 = 0x4b504344; // 'DCPK' LE
     pub const VERSION: u16 = 1;
@@ -531,6 +531,9 @@ pub mod audio {
     pub const OP_SET_VOLUME: u8 = 7;
     pub const OP_END_STREAM: u8 = 8;
     pub const OP_POLL: u8 = 9;
+    pub const OP_OPEN_INPUT: u8 = 10;
+    pub const OP_READ_INPUT: u8 = 11;
+    pub const OP_CLOSE_INPUT: u8 = 12;
     /// Accepted stream rates: integer divisors of the PSP's native 44.1 kHz.
     pub const RATES: [u32; 3] = [44100, 22050, 11025];
     pub const MAX_CHANNELS: u32 = 2;
@@ -540,26 +543,7 @@ pub mod audio {
     pub const EVENT_CREDIT: &str = "credit";
     pub const EVENT_UNDERRUN: &str = "underrun";
     pub const EVENT_ENDED: &str = "ended";
-}
-
-/// DB module boundary (contracts/spec/db.ts — `globalThis.db`).
-/// SQLite behind five synchronous ops; rows cross as one JSON line per
-/// query() call. The module owns no clock and emits no events.
-pub mod db {
-    pub const OP_OPEN: u8 = 1;
-    pub const OP_CLOSE: u8 = 2;
-    pub const OP_EXEC: u8 = 3;
-    pub const OP_QUERY: u8 = 4;
-    pub const OP_LAST_ERROR: u8 = 5;
-    /// The in-memory database name (private to the handle).
-    pub const MEMORY: &str = ":memory:";
-    /// Marker key for a BLOB value inside a row or a parameter list.
-    pub const BLOB_KEY: &str = "$b";
-    /// Largest integer magnitude that crosses the boundary losslessly.
-    pub const MAX_SAFE_INTEGER: i64 = 9007199254740991;
-    pub const MAX_DATABASES: usize = 4;
-    /// Result-row ceiling per query() call (exceeding it fails the op).
-    pub const MAX_RESULT_ROWS: usize = 4096;
+    pub const EVENT_OVERRUN: &str = "overrun";
 }
 
 /// FS module boundary (contracts/spec/fs.ts — `globalThis.fs`).
@@ -578,7 +562,7 @@ pub mod fs {
     /// write() modes.
     pub const WRITE_TRUNCATE: u32 = 0;
     pub const WRITE_APPEND: u32 = 1;
-    /// Marker key for a bytes payload (db's blob spelling).
+    /// Marker key for a bytes payload.
     pub const BLOB_KEY: &str = "$b";
     /// Maximum UTF-8 bytes in one path segment.
     pub const MAX_SEGMENT_BYTES: usize = 64;
@@ -592,38 +576,29 @@ pub mod fs {
     pub const MAX_DIR_ENTRIES: usize = 256;
 }
 
-/// NET module boundary (contracts/spec/net.ts — `globalThis.net`).
-/// Bounded whole-response HTTP; completions batch to tick boundaries.
-pub mod net {
-    pub const OP_START: u8 = 1;
-    pub const OP_TAKE: u8 = 2;
-    pub const OP_CANCEL: u8 = 3;
-    pub const OP_POLL: u8 = 4;
-    pub const OP_LAST_ERROR: u8 = 5;
-    pub const MAX_INFLIGHT: usize = 2;
-    pub const MAX_REQUEST_BYTES: usize = 65536;
-    pub const DEFAULT_RESPONSE_BYTES: usize = 131072;
-    pub const MAX_RESPONSE_BYTES: usize = 262144;
-    pub const MAX_HEADERS: usize = 32;
-    pub const MAX_HEADER_BYTES: usize = 8192;
-    pub const DEFAULT_TIMEOUT_MS: u32 = 30000;
-    pub const MAX_TIMEOUT_MS: u32 = 120000;
-    pub const MAX_REDIRECTS: usize = 3;
-    pub const METHODS: [&str; 7] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
-    pub const EVENT_DONE: &str = "done";
-    pub const EVENT_ERROR: &str = "error";
-    pub const ERROR_UNAVAILABLE: &str = "unavailable";
-    pub const ERROR_INVALID_REQUEST: &str = "invalid_request";
-    pub const ERROR_BUSY: &str = "busy";
-    pub const ERROR_DNS: &str = "dns";
-    pub const ERROR_CONNECT: &str = "connect";
-    pub const ERROR_TLS: &str = "tls";
-    pub const ERROR_TIMEOUT: &str = "timeout";
-    pub const ERROR_REDIRECT: &str = "redirect";
-    pub const ERROR_RESPONSE_TOO_LARGE: &str = "response_too_large";
-    pub const ERROR_PROTOCOL: &str = "protocol";
-    pub const ERROR_CANCELLED: &str = "cancelled";
-    pub const ERROR_OTHER: &str = "other";
+/// PACK module boundary (contracts/spec/pack.ts — `globalThis.pack`).
+/// Read-only files under the game data root; loadImg decodes an IMG entry
+/// to a texture without passing its bytes through the JS heap.
+pub mod pack {
+    pub const OP_OPEN: u8 = 1;
+    pub const OP_SIZE: u8 = 2;
+    pub const OP_READ: u8 = 3;
+    pub const OP_LOAD_IMG: u8 = 4;
+    pub const OP_CLOSE: u8 = 5;
+    pub const OP_STATS: u8 = 6;
+    pub const OP_MEM: u8 = 7;
+    pub const OP_GC: u8 = 8;
+    /// open() results below zero.
+    pub const OPEN_MISSING: i32 = -1;
+    pub const OPEN_PENDING: i32 = -2;
+    /// Files open at once per guest.
+    pub const MAX_HANDLES: usize = 8;
+    /// Upper bound of one loadImg byte range.
+    pub const MAX_IMG_BYTES: usize = 1114112;
+    /// Path grammar ceilings (UTF-8 bytes; segments).
+    pub const MAX_PATH_BYTES: usize = 200;
+    pub const MAX_SEGMENT_BYTES: usize = 64;
+    pub const MAX_DEPTH: usize = 8;
 }
 
 /// 2D bodies stepped by the UI core (contracts/spec/physics.ts).

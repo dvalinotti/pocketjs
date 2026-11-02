@@ -77,12 +77,14 @@ export const DYNAMIC_FORMS: readonly TargetForm[] = ["window", "widget"];
  * - "still":      the display shows one change per refresh (electronic
  *                 paper); a tween is its end value.
  *
- * `deriveAnimationClass` (contracts/spec/animation.ts) reads it from the
- * profile: by platform when the display leaves it out.
+ * Every profile states its class (`display.animation`); the compiler bakes
+ * it into the plan and devices admit packages compiled for their own class.
  */
 export const ANIMATION_CLASSES = ["composited", "repaint", "still"] as const;
 export type AnimationClass = (typeof ANIMATION_CLASSES)[number];
 
+/** One output as the resolver reads it: the profile surface with its
+ *  physical panel size (`panel` in the host contract). */
 export interface FixedDisplayProfile {
   readonly physicalViewport: Viewport;
   readonly logicalViewports: readonly Viewport[];
@@ -117,14 +119,15 @@ export interface DisplayProfile extends FixedDisplayProfile {
    * per-surface raster asset variants.
    */
   readonly auxiliary?: FixedDisplayProfile;
-  /** The target's animation class when it differs from its platform's
-   *  (contracts/spec/animation.ts). */
-  readonly animation?: AnimationClass;
+  /** What a changed frame costs the target (contracts/spec/animation.ts). */
+  readonly animation: AnimationClass;
 }
 
+/** The resolver's view of a host contract (hosts/contract.ts
+ *  `targetProfile`). */
 export interface TargetProfile<C extends string = string> {
-  /** Legacy registry adapter: omitted rates retain its 60 Hz contract. */
-  readonly tickHz?: number;
+  /** Presented frames per second the host can drive. */
+  readonly cadences: readonly number[];
   /** Generated UI binding generation; all profiles use the shared constant. */
   readonly hostAbi: number;
   /** Device/OS substrate ("psp", "vita", "macos", …). Queryable data — the
@@ -139,6 +142,10 @@ export interface TargetProfile<C extends string = string> {
   readonly roleCapabilities?: {
     readonly systemUI?: readonly C[];
   };
+  /** The host contract this view was made from. A view written directly
+   *  (a test registry) has none; the resolver then reads the document's
+   *  facts back from the view. */
+  readonly source?: import("./profile.ts").PocketProfile<C>;
 }
 
 export type TargetRegistry<C extends string = string> = Readonly<Record<string, TargetProfile<C>>>;
@@ -153,13 +160,16 @@ export function defineTargetRegistry<
 export type TargetId<T extends TargetRegistry> = Extract<keyof T, string>;
 
 export const POCKET_CAPABILITIES = defineCapabilityRegistry([
+  "runtime.worker",
+  "io.i2c",
+  "io.uart",
   "input.analog.left",
   "input.analog.right",
   "input.buttons",
   // Framework-synthesized pointer for targets without a native one: the
   // analog nub steers a screen cursor, hover applies `focus:`, the press
   // button applies `active:` and clicks on release. Opt-in per app
-  // (enableCursor + pocket.json requires/enhances) — d-pad focus traversal
+  // (enableCursor + pocket.app.json requires/enhances) — d-pad focus traversal
   // remains the portable default interaction.
   "input.cursor",
   // OS text composition: preedit renders inline at the caret with its own
@@ -202,6 +212,10 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // appends the id to its profile only when its native host ships the module
   // (the ring/thread discipline to copy is platforms/psp/audio/src/output.rs).
   "audio.pcm",
+  // Microphone input on the audio module's namespace (openInput, readInput,
+  // closeInput in contracts/spec/audio.ts): the host records one of its
+  // inputs into a per-input ring the guest drains each tick.
+  "audio.capture",
   // Native encoded-media playback with bounded worker handoff, audio clock,
   // pause/volume, texture output and observable decoder availability.
   "media.playback",
@@ -210,14 +224,19 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // directory scan, tags, decode, seek and artwork stay in a native worker;
   // the guest sends commands and reads a JSON status snapshot. The sim host
   // implements the contract (platforms/sim/localmedia.ts); a device target
-  // appends the id to its profile when its native host ships the module.
+  // lists the id in its host contract when its native host ships the module.
   "media.local",
-  // Bounded whole-response HTTP through `fetch()` and the net module's own
-  // namespace (`globalThis.net`, contracts/spec/net.ts). Transport adapters
-  // remain host-owned; the browser dev host, deterministic sim and reference
-  // core exercise the contract without granting network access to every host.
+  // HTTP as a worker resource (`io.http` in @pocketjs/framework/io,
+  // engine/worker): bounded streaming requests through the host's transport
+  // under the limits of contracts/spec/net.ts. No UI realm has a network
+  // namespace.
   "io.offload",
   "net.http",
+  // MQTT 3.1.1 and 5.0 sessions as a worker resource (`io.mqtt` in
+  // @pocketjs/framework/io, engine/worker): one broker connection per
+  // resource, its messages streamed as records under the limits of
+  // contracts/spec/mqtt.ts.
+  "net.mqtt",
   // The console's system link to a paired companion computer
   // (`globalThis.link`, contracts/spec/link.ts): pairing, link status, the
   // companion's app catalog and app installs. The 3ds-dev host owns the link
@@ -226,6 +245,10 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // The console's wireless radio and saved connections (`globalThis.wifi`,
   // contracts/spec/wifi.ts). Reads and selects; never writes a connection.
   "system.wifi",
+  // The board's own controls (`globalThis.device`, contracts/spec/device.ts):
+  // backlight, speaker level, power rails, plug detection, free header pins,
+  // the removable card's directory listing and power off.
+  "system.device",
   // Outer-camera preview texture plus an on-device QR decoder
   // (`globalThis.camera`, contracts/spec/camera.ts).
   "camera.qr",
@@ -238,25 +261,27 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
   // declares it hands the top screen to the host's 3D stage and keeps its
   // whole interface on the auxiliary surface.
   "system.agent",
-  // SQLite behind the db module's own namespace (`globalThis.db`,
-  // contracts/spec/db.ts): five synchronous ops, rows as one JSON line per
-  // query() call, per-app storage the host confines. Registered ahead of any
-  // stock TARGET advertising it: the sim host and the engine/crates/pocket-db
-  // reference core implement and test the whole contract, so apps can already
-  // declare the requirement and fail admission where the module is absent. A
-  // device target appends the id to its profile only when its native host
-  // ships the module.
-  "data.sqlite",
+  // A product extension linked into the program: it draws the primary display and
+  // publishes its own global, and the guest's interface stays on the auxiliary surface.
+  "system.extension",
   // A per-app file tree behind the fs module's own namespace
   // (`globalThis.fs`, contracts/spec/fs.ts): nine synchronous ops, every
   // path confined to the app's own data root — apps cannot name, let alone
-  // reach, each other's trees. Registered ahead of any stock TARGET
-  // advertising it: the sim host and the engine/crates/pocket-fs reference
-  // core implement and test the whole contract, so apps can already declare
-  // the requirement and fail admission where the module is absent. A device
-  // target appends the id to its profile only when its native host ships
-  // the module.
+  // reach, each other's trees. The sim host (platforms/sim/fs.ts) and the
+  // host-services implementation (engine/host-services/fs.c, compiled into
+  // the 3DS product and the Tab5 program) ship the whole contract; a device
+  // target appends the id to its profile only when its program compiles the
+  // module in.
   "data.fs",
+  // Read-only files under the game data root behind the pack module's own
+  // namespace (`globalThis.pack`, contracts/spec/pack.ts): six synchronous
+  // ops whose reads land in guest-owned buffers and whose loadImg decodes an
+  // IMG entry to a texture without passing through the JS heap. The psp
+  // program (programs/psp/src/pack_ops.rs) mounts it; the sim
+  // (platforms/sim/pack.ts) and the browser (platforms/web/pack.js) implement
+  // the whole contract for tests and for hosts that mount them. A target
+  // appends the id only when its program compiles the module in.
+  "data.pack",
   // Copy/cut/paste round-trips with the OS clipboard.
   "host.clipboard",
   // The logical viewport is runtime-mutable: the app is told about live
@@ -288,9 +313,12 @@ export const POCKET_CAPABILITIES = defineCapabilityRegistry([
 
 export type PocketCapabilityId = CapabilityId<typeof POCKET_CAPABILITIES>;
 
+/** Registered capability ids and the targets resolution reads. A target
+ * may list names the registry does not know; applications cannot require
+ * them. */
 export interface PlatformContractRegistry<
   C extends CapabilityRegistry = CapabilityRegistry,
-  T extends TargetRegistry<CapabilityId<C>> = TargetRegistry<CapabilityId<C>>,
+  T extends TargetRegistry = TargetRegistry,
 > {
   readonly capabilities: C;
   readonly targets: T;
@@ -298,7 +326,7 @@ export interface PlatformContractRegistry<
 
 export function definePlatformContractRegistry<
   const C extends CapabilityRegistry,
-  const T extends TargetRegistry<CapabilityId<C>>,
+  const T extends TargetRegistry,
 >(capabilities: C, targets: T): PlatformContractRegistry<C, T> {
   return { capabilities, targets };
 }

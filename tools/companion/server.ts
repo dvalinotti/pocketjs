@@ -3,8 +3,10 @@
 // is, pairing windows, and per-connection dispatch of net / catalog / install.
 
 import { createSocket, type Socket as UdpSocket } from "node:dgram";
+import { existsSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { networkInterfaces } from "node:os";
+import { join } from "node:path";
 import {
   LINK_BEACON_PORT,
   LINK_FEATURE,
@@ -20,9 +22,11 @@ import {
 } from "../../contracts/spec/link.ts";
 import { NET_ERROR } from "../../contracts/spec/net.ts";
 import { AgentService, AGENT_LINK_FEATURE, type AgentLink, type AgentServiceOptions, type AgentSession } from "./agent.ts";
-import { AppCatalog, PackageReader } from "./catalog.ts";
+import { AppCatalog, PackageReader, type CatalogEntry } from "./catalog.ts";
+import { findCodex, userCodexHome } from "./codex.ts";
 import { NetFailure, normalizeNetRequest, performNet, type NetRequest } from "./fetch.ts";
 import { ServiceHost } from "./services.ts";
+import { StreamCredit } from "./stream-credit.ts";
 import {
   LinkFrameDecoder,
   LinkProtocolError,
@@ -43,6 +47,7 @@ import {
   type LinkCtrl,
 } from "./protocol.ts";
 import { CompanionStore, defaultCompanionName } from "./store.ts";
+import { UsbCarrier } from "./usb.ts";
 
 /** The companion's wall clock for the console (link.ts `clock`): UTC and
  *  local time in epoch milliseconds, so the offset never goes negative on
@@ -52,12 +57,29 @@ function linkClock(): { utc: number; local: number } {
   return { utc, local: utc - new Date(utc).getTimezoneOffset() * 60_000 };
 }
 
-export const LINK_FEATURES = [LINK_FEATURE.net, LINK_FEATURE.catalog, LINK_FEATURE.install];
+export const LINK_FEATURES = [LINK_FEATURE.catalog, LINK_FEATURE.install, LINK_FEATURE.netStream];
 /** Concurrent net requests one connection may hold open. */
 export const LINK_MAX_NET = 8;
 /** Failed pairing proofs before a window closes. */
 const PAIR_MAX_FAILURES = 5;
 const DEFAULT_TARGET = "3ds-dev";
+
+/** One console's end of a link extension. */
+export interface LinkExtensionSession {
+  handle(message: LinkCtrl): void;
+  /** True when the data frame was this extension's. */
+  data(stream: number, bytes: Uint8Array): boolean;
+  detach(link: AgentLink): void;
+}
+
+/** A feature a program adds to the link: `<feature>.*` ctrl messages reach its session. */
+export interface LinkExtension {
+  readonly feature: string;
+  attach(link: AgentLink): LinkExtensionSession;
+  stop(): void;
+}
+
+export type LinkExtensionFactory = (context: { readonly storeDir: string; log(line: string): void }) => LinkExtension;
 
 export interface CompanionOptions {
   store: CompanionStore;
@@ -81,6 +103,11 @@ export interface CompanionOptions {
   log?: (line: string) => void;
   /** The console agent (contracts/spec/agent.ts); absent or false: off. */
   agent?: false | Partial<Omit<AgentServiceOptions, "storeDir" | "catalog" | "log">>;
+  /** Features a program built on this companion adds to the link. */
+  extensions?: readonly LinkExtensionFactory[];
+  /** USB shares a tethered console reaches this companion through (the
+   *  link.ts USB carrier): each one gets a `pocket-link/` directory. */
+  usb?: string[];
 }
 
 export interface PairingWindow {
@@ -123,11 +150,13 @@ export class Companion {
   readonly name: string;
   readonly catalog: AppCatalog;
   readonly agent: AgentService | null;
+  readonly extensions: readonly LinkExtension[];
   readonly services: ServiceHost;
   private server: Server | undefined;
   private beaconSocket: UdpSocket | undefined;
   private beaconTimer: ReturnType<typeof setInterval> | undefined;
   private connections = new Set<LinkConnection>();
+  private usb: UsbCarrier[] = [];
   private pairing: PairingWindow | undefined;
   private pairTimer: ReturnType<typeof setTimeout> | undefined;
   private cliDirs: string[];
@@ -141,12 +170,13 @@ export class Companion {
     this.agent = options.agent
       ? new AgentService({ ...options.agent, storeDir: this.store.dir, catalog: this.catalog, log: (line) => this.log(line) })
       : null;
+    this.extensions = (options.extensions ?? []).map((create) => create({ storeDir: this.store.dir, log: (line) => this.log(line) }));
     this.services = new ServiceHost({ storeDir: this.store.dir, log: (line) => this.log(line) });
   }
 
   /** The features a linked console is offered: the agent only when codex is usable. */
   features(): string[] {
-    return this.agent?.available ? [...LINK_FEATURES, AGENT_LINK_FEATURE] : LINK_FEATURES;
+    return [...LINK_FEATURES, ...(this.agent?.available ? [AGENT_LINK_FEATURE] : []), ...this.extensions.map((extension) => extension.feature)];
   }
 
   log(line: string) {
@@ -192,6 +222,11 @@ export class Companion {
     this.log(`link: listening ${host}:${this.port} as ${this.id} "${this.name}"`);
     this.catalog.watch();
     if (this.options.beacon !== false) await this.startBeacons();
+    for (const share of this.options.usb ?? []) {
+      const carrier = new UsbCarrier(this, share);
+      carrier.start();
+      this.usb.push(carrier);
+    }
   }
 
   async stop(): Promise<void> {
@@ -199,7 +234,10 @@ export class Companion {
     clearTimeout(this.pairTimer);
     this.catalog.close();
     for (const connection of this.connections) connection.close("companion stopping");
+    for (const carrier of this.usb) carrier.stop();
+    this.usb = [];
     this.agent?.stop();
+    for (const extension of this.extensions) extension.stop();
     this.services.close();
     this.beaconSocket?.close();
     this.beaconSocket = undefined;
@@ -223,12 +261,19 @@ export class Companion {
     this.beaconTimer = setInterval(send, tuning.intervalMs ?? 1_000);
   }
 
+  /** The interfaces' broadcast addresses, read again every 10 s: listing
+   *  them every second took a CardputerZero a tenth of a core. */
+  private broadcasts: { at: number; addresses: string[] } | undefined;
+
   /** Every address one beacon goes to this second. */
   beaconTargets(broadcast = true): string[] {
     const targets = new Set<string>();
     if (broadcast) {
       targets.add("255.255.255.255");
-      for (const iface of lanInterfaces()) targets.add(iface.broadcast);
+      if (!this.broadcasts || Date.now() - this.broadcasts.at > 10_000) {
+        this.broadcasts = { at: Date.now(), addresses: lanInterfaces().map((iface) => iface.broadcast) };
+      }
+      for (const address of this.broadcasts.addresses) targets.add(address);
     }
     for (const entry of this.store.consoles()) if (entry.lastAddress) targets.add(entry.lastAddress);
     for (const address of this.options.unicast ?? []) targets.add(address);
@@ -319,6 +364,10 @@ export class Companion {
       if (!connection.ready || !connection.device) continue;
       out.push({ ...connection.device, address: connection.address, since: connection.since });
     }
+    for (const carrier of this.usb) {
+      const device = carrier.linked();
+      if (device) out.push({ id: device.id, name: device.name, model: device.model, target: device.target, address: "usb", since: device.since });
+    }
     return out;
   }
 
@@ -346,6 +395,30 @@ export class Companion {
     socket.on("close", () => this.connections.delete(connection));
   }
 
+  /** The console agent as the setup screen shows it: on, or what it waits
+   *  for. `codex` and `signedIn` are read now, so a Codex installed or
+   *  signed in since the start shows as ready to turn on (a restart). */
+  agentState() {
+    const codex = findCodex();
+    return {
+      on: this.agent?.available ?? false,
+      enabled: this.agent !== null,
+      codex,
+      signedIn: existsSync(join(userCodexHome(), "auth.json")),
+    };
+  }
+
+  /** Every app the catalog offers, once: for the default target and for the
+   *  others (a PSP's applets on the computer it is plugged into), the default
+   *  target's variant first. */
+  private offeredApps() {
+    const apps = new Map<string, Omit<CatalogEntry, "path">>();
+    for (const target of [DEFAULT_TARGET, ...this.catalog.targets()]) {
+      for (const { path: _path, ...app } of this.catalog.entries(target)) if (!apps.has(app.id)) apps.set(app.id, app);
+    }
+    return [...apps.values()].sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
+  }
+
   status() {
     const window = this.pairingWindow();
     return {
@@ -359,7 +432,7 @@ export class Companion {
       },
       consoles: this.connected(),
       paired: this.store.consoles().map(({ key: _key, ...entry }) => entry),
-      apps: this.catalog.apps(DEFAULT_TARGET),
+      apps: this.offeredApps(),
       appsDirs: this.catalog.directories,
       appsDir: this.store.appsDir,
       pairing: window ? { open: true, uri: window.uri, expiresAt: window.expiresAt } : { open: false },
@@ -380,6 +453,8 @@ interface NetPending {
   received: number;
   abort: AbortController;
   started: boolean;
+  stream: StreamCredit;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 class LinkConnection {
@@ -401,6 +476,7 @@ class LinkConnection {
   private drainWaiters: (() => void)[] = [];
   private agentSession: AgentSession | undefined;
   private agentLink: AgentLink | undefined;
+  private extensionSessions: { readonly prefix: string; readonly session: LinkExtensionSession }[] = [];
 
   constructor(
     private readonly companion: Companion,
@@ -441,11 +517,21 @@ class LinkConnection {
   }
 
   /** Write a frame and wait while the socket buffer is full. */
-  private async write(frame: Uint8Array): Promise<boolean> {
-    if (this.stage === "closed") return false;
+  private async write(frame: Uint8Array, signal?: AbortSignal): Promise<boolean> {
+    if (this.stage === "closed" || signal?.aborted) return false;
     if (this.socket.write(frame)) return true;
-    await new Promise<void>((resolve) => this.drainWaiters.push(resolve));
-    return !this.isClosed();
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        signal?.removeEventListener("abort", finish);
+        const index = this.drainWaiters.indexOf(finish);
+        if (index >= 0) this.drainWaiters.splice(index, 1);
+        resolve();
+      };
+      this.drainWaiters.push(finish);
+      signal?.addEventListener("abort", finish, { once: true });
+      if (signal?.aborted) finish();
+    });
+    return !this.isClosed() && !signal?.aborted;
   }
 
   /** Read through a method: the stage changes inside awaits and callbacks. */
@@ -468,11 +554,12 @@ class LinkConnection {
     this.ready = false;
     clearTimeout(this.handshakeTimer);
     clearInterval(this.silenceTimer);
-    for (const pending of this.net.values()) pending.abort.abort();
+    for (const pending of this.net.values()) { pending.abort.abort(); clearTimeout(pending.timer); }
     this.net.clear();
     for (const install of this.installs.values()) install.cancelled = true;
     this.installs.clear();
     if (this.agentLink) this.agentSession?.detach(this.agentLink);
+    if (this.agentLink) for (const { session } of this.extensionSessions) session.detach(this.agentLink);
     const waiters = this.drainWaiters;
     this.drainWaiters = [];
     for (const wake of waiters) wake();
@@ -579,6 +666,7 @@ class LinkConnection {
     const link: AgentLink = { device, send: (message) => this.send(message), sendData: (stream, bytes) => this.sendData(stream, bytes) };
     this.agentLink = link;
     this.agentSession = this.companion.agent?.attach(link);
+    this.extensionSessions = this.companion.extensions.map((extension) => ({ prefix: `${extension.feature}.`, session: extension.attach(link) }));
     this.silenceTimer = setInterval(() => {
       if (Date.now() - this.lastRx > LINK_SILENCE_MS) this.close(`silent for ${LINK_SILENCE_MS} ms`);
     }, 1_000);
@@ -593,11 +681,20 @@ class LinkConnection {
       case "net":
         if (!validId) return;
         return this.netStart(id as number, message);
+      case "net.credit": {
+        if (!validId) return;
+        const pending = this.net.get(id as number);
+        if (pending?.stream && !pending.stream.grant(Number(message.bytes))) {
+          pending.abort.abort(new Error("invalid receiver credit"));
+        }
+        return;
+      }
       case "net.cancel": {
         if (!validId) return;
         const pending = this.net.get(id as number);
         if (pending) {
           pending.abort.abort();
+          clearTimeout(pending.timer);
           this.net.delete(id as number);
         }
         return;
@@ -610,6 +707,7 @@ class LinkConnection {
         return void this.install(id as number, message.app);
       default:
         if (typeof message.t === "string" && message.t.startsWith("agent.")) this.agentSession?.handle(message);
+        else this.extensionSessions.find(({ prefix }) => typeof message.t === "string" && message.t.startsWith(prefix))?.session.handle(message);
         return; // other unknown ctrl types are ignored
     }
   }
@@ -627,13 +725,28 @@ class LinkConnection {
     }
     const { bytes, ...rest } = meta;
     const app = typeof message.app === "string" ? message.app : "";
-    const pending: NetPending = { meta: rest, app, expected: bytes, chunks: [], received: 0, abort: new AbortController(), started: false };
+    // Every net request streams its response under the console's byte credit.
+    if (message.stream !== true) return error(NET_ERROR.invalidRequest, "net requests stream: send stream:true with an initial credit");
+    const credit = Number(message.credit);
+    if (!Number.isInteger(credit) || credit < 1 || credit > 8192) return error(NET_ERROR.invalidRequest, "stream credit must be 1..8192");
+    const abort = new AbortController();
+    const pending: NetPending = {
+      meta: rest, app, expected: bytes, chunks: [], received: 0, abort, started: false,
+      stream: new StreamCredit(credit, abort.signal),
+      timer: setTimeout(() => {
+        abort.abort(new NetFailure(NET_ERROR.timeout, "stream deadline exceeded"));
+        if (!pending.started && this.net.get(id) === pending) {
+          this.net.delete(id);
+          error(NET_ERROR.timeout, "request body deadline exceeded");
+        }
+      }, rest.timeoutMs),
+    };
     this.net.set(id, pending);
     if (bytes === 0) void this.netRun(id, pending);
   }
 
   private data(stream: number, bytes: Uint8Array) {
-    if (!this.net.has(stream) && this.agentSession?.data(stream, bytes)) return;
+    if (!this.net.has(stream) && (this.extensionSessions.some(({ session }) => session.data(stream, bytes)) || this.agentSession?.data(stream, bytes))) return;
     const pending = this.net.get(stream);
     if (!pending || pending.started) return; // a cancelled or unknown stream
     pending.received += bytes.length;
@@ -656,30 +769,46 @@ class LinkConnection {
     try {
       const device = this.device ?? { id: "", name: "", model: "", target: "" };
       const services = this.companion.catalog.find(device.target, pending.app)?.services ?? [];
-      const response =
-        (await this.companion.services.handle(
-          { ...pending.meta, body },
-          { name: device.name, address: this.address, localAddress: this.localAddress },
-          { app: pending.app, services },
-          pending.abort.signal,
-        )) ??
-        (await performNet(
-          { ...pending.meta, body },
-          { allowPrivate: this.companion.options.allowPrivate, signal: pending.abort.signal, resolve: this.companion.options.resolve },
-        ));
-      if (this.net.get(id) !== pending) return;
-      this.companion.log(`${label} ${response.status} ${response.body.length}B ${Date.now() - started}ms`);
-      this.send({ t: "net.head", id, status: response.status, url: response.url, headers: response.headers, bytes: response.body.length });
-      for (let at = 0; at < response.body.length; at += LINK_MAX_DATA) {
-        if (this.net.get(id) !== pending) return; // cancelled mid-stream: the console dropped the stream
-        if (!(await this.write(encodeData(id, response.body.subarray(at, at + LINK_MAX_DATA))))) return;
+      let offset = 0;
+      const sink = {
+        head: (head: { status: number; url: string; headers: Record<string, string> }) => {
+          if (this.net.get(id) === pending) this.send({ t: "net.head", id, ...head, stream: true });
+        },
+        chunk: async (bytes: Uint8Array) => {
+          for (let at = 0; at < bytes.length;) {
+            const count = await pending.stream.take(Math.min(1024, bytes.length - at));
+            if (this.net.get(id) !== pending) throw new NetFailure(NET_ERROR.cancelled, "stream cancelled");
+            if (!(await this.write(encodeData(id, bytes.subarray(at, at + count)), pending.abort.signal))) throw new NetFailure(NET_ERROR.connect, "link closed");
+            at += count;
+            offset += count;
+          }
+        },
+      };
+      // Service responses retain their declared whole-response bound. External
+      // HTTP reads one chunk at a time and awaits the receiver's credit.
+      const service = await this.companion.services.handle(
+        { ...pending.meta, body },
+        { name: device.name, address: this.address, localAddress: this.localAddress },
+        { app: pending.app, services }, pending.abort.signal);
+      if (service) {
+        sink.head(service);
+        await sink.chunk(service.body);
+      } else {
+        await performNet({ ...pending.meta, body }, {
+          allowPrivate: this.companion.options.allowPrivate, signal: pending.abort.signal,
+          resolve: this.companion.options.resolve,
+        }, sink);
       }
+      if (this.net.get(id) !== pending) return;
+      this.companion.log(`${label} ${offset}B ${Date.now() - started}ms`);
+      this.send({ t: "net.end", id, bytes: offset });
     } catch (failure) {
       if (this.net.get(id) !== pending) return;
       const f = failure instanceof NetFailure ? failure : new NetFailure(NET_ERROR.other, String(failure));
       this.companion.log(`${label} ${f.code}: ${f.message}`);
       this.send({ t: "net.error", id, code: f.code, message: f.message.slice(0, 200) });
     } finally {
+      clearTimeout(pending.timer);
       if (this.net.get(id) === pending) this.net.delete(id);
     }
   }

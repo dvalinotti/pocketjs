@@ -80,6 +80,7 @@ static const char *package_error(int32_t code) {
     case 15: return "package plan has an unusable auxiliary surface";
     case 16: return "package profile hash mismatch";
     case 17: return "invalid package layout";
+    case 18: return "worker capability and package section disagree";
     default: return "invalid package arguments";
   }
 }
@@ -246,8 +247,7 @@ PocketRuntimePackage *runtime_package_load(
   int32_t result = pocket_package_open(
     package->bytes,
     package->length,
-    (const uint8_t *)POCKETJS_TARGET_ID,
-    sizeof POCKETJS_TARGET_ID - 1,
+    &pocket_3ds_profile,
     POCKETJS_HOST_ABI,
     pocket_3ds_profile_hash,
     &package->guest

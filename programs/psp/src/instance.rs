@@ -8,6 +8,12 @@ use libquickjs_sys::*;
 use pocket_drivers::{AxisSample, InputClasses, InputFrameBuilder, InputSource};
 use pocket_runtime::{OpArg, OpContext, OpProvider, OpResult, RuntimeError};
 use pocket_runtime_cabi::abi::*;
+
+const JS_STRIP_SOURCE: core::ffi::c_int = 1;
+extern "C" {
+    fn JS_SetStripInfo(rt: *mut libquickjs_sys::JSRuntime, flags: core::ffi::c_int);
+}
+
 extern "C" {
     fn JS_SetContextOpaque(context: *mut JSContext, opaque: *mut c_void);
     fn JS_GetContextOpaque(context: *mut JSContext) -> *mut c_void;
@@ -29,7 +35,13 @@ pub(crate) struct Guest {
     pub global: JSValue,
     adapter: *mut c_void,
     pub ops: OpContext,
-    sim_hz: u32,
+    /// A host cadence policy that replaces the runtime's choice when it
+    /// divides the package rate (multi-app builds present at 20 Hz).
+    fixed_cadence: Option<u32>,
+    /// The admitted package's rate and the cadence published as __simHz;
+    /// set when the runtime initializes the guest.
+    pub tick_hz: Cell<u32>,
+    pub sim_hz: Cell<u32>,
     pub code_length: Cell<usize>,
     pub pak_length: Cell<usize>,
     pub eval_begin: Cell<u64>,
@@ -39,11 +51,14 @@ pub(crate) struct Guest {
     pub after_jobs: Cell<u64>,
 }
 impl Guest {
-    pub unsafe fn new(ops: OpContext, sim_hz: u32) -> Result<Box<Self>, String> {
+    pub unsafe fn new(ops: OpContext, fixed_cadence: Option<u32>) -> Result<Box<Self>, String> {
         let engine = crate::qjs_alloc::new_runtime();
         if engine.is_null() {
             return Err("JS_NewRuntime failed".into());
         }
+        // Do not keep each function's source text for toString(): nested functions repeat their parents'
+        // text, so a bundle otherwise costs several times its own size in heap on a 32 MB machine.
+        JS_SetStripInfo(engine, JS_STRIP_SOURCE);
         let context = JS_NewContext(engine);
         if context.is_null() {
             JS_FreeRuntime(engine);
@@ -62,7 +77,9 @@ impl Guest {
             global,
             adapter,
             ops,
-            sim_hz,
+            fixed_cadence,
+            tick_hz: Cell::new(0),
+            sim_hz: Cell::new(0),
             code_length: Cell::new(0),
             pak_length: Cell::new(0),
             eval_begin: Cell::new(0),
@@ -133,11 +150,18 @@ unsafe extern "C" fn initialize(
     }
     guest.pak_length.set((*environment).pak_length);
     crate::service_bindings::register_private(guest.context, guest.global);
+    let tick_hz = (*environment).tick_hz;
+    let sim_hz = match guest.fixed_cadence {
+        Some(cadence) if tick_hz % cadence == 0 && tick_hz / cadence <= 60 => cadence,
+        _ => (*environment).sim_hz,
+    };
+    guest.tick_hz.set(tick_hz);
+    guest.sim_hz.set(sim_hz);
     if JS_SetPropertyStr(
         guest.context,
         guest.global,
         b"__simHz\0".as_ptr().cast(),
-        JS_NewInt32(guest.context, guest.sim_hz as i32),
+        JS_NewInt32(guest.context, sim_hz as i32),
     ) < 0
     {
         return -1;
@@ -193,6 +217,7 @@ pub(crate) const GUEST: PocketGuestV1 = PocketGuestV1 {
     frame: Some(frame),
     collect: Some(collect),
     shutdown: Some(shutdown),
+    evaluate_bytecode: None,
 };
 #[derive(Default)]
 pub(crate) struct Input {

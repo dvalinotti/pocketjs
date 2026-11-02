@@ -2,10 +2,10 @@
 
 // `.pocket` packaging (docs/PLATFORM.md L2; format in contracts/spec/pocket-package.ts).
 //
-//   bun tools/pocket-pack.ts build --manifest apps/hero/pocket.json \
+//   bun tools/pocket-pack.ts build --manifest apps/hero/pocket.app.json \
 //       --target psp --target vita [-o dist/packages/hero.pocket]
 //   bun tools/pocket-pack.ts build --manifest ... --all-targets
-//   bun tools/pocket-pack.ts build --manifest game/pocket.json --project-root game --target psp
+//   bun tools/pocket-pack.ts build --manifest game/pocket.app.json --project-root game --target psp
 //   bun tools/pocket-pack.ts inspect <file.pocket>
 //   bun tools/pocket-pack.ts thin <file.pocket> --target psp -o out.pocket
 //   bun tools/pocket-pack.ts verify <file.pocket>
@@ -18,10 +18,11 @@
 // own manifest disowns.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { planProfileDocument } from "../framework/src/manifest/plan.ts";
 import { dirname, join, relative, resolve } from "node:path";
 import { POCKET_TARGETS } from "../contracts/spec/platforms.ts";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
-import { readPocketManifest } from "../framework/src/manifest/load.ts";
+import { readAuthoredManifest } from "../framework/src/manifest/load.ts";
 import {
   canonicalJson,
   verifyPlanHash,
@@ -32,8 +33,10 @@ import { profileRegistry, resolveProfile } from "./profile-resolver.ts";
 import { POCKET_BINDING_GENERATION } from "../contracts/spec/binding-generation.ts";
 import {
   POCKET_SECTION,
+  decodeBytecodeEnvelope,
   decodePocketPackage,
   decodeHostInputs,
+  decodeIdentity,
   encodeHostInputs,
   encodeIdentity,
   encodePocketPackage,
@@ -50,7 +53,7 @@ function usage(message?: string): never {
   if (message) console.error(`pocket-pack: ${message}`);
   console.error(
     "usage:\n" +
-      "  bun tools/pocket-pack.ts build --manifest <pocket.json> (--target <t>)+ | --all-targets [--project-root <dir>] [-o <file>]\n" +
+      "  bun tools/pocket-pack.ts build --manifest <pocket.app.json> (--target <t>)+ | --all-targets [--project-root <dir>] [-o <file>]\n" +
       "  bun tools/pocket-pack.ts inspect <file.pocket>\n" +
       "  bun tools/pocket-pack.ts thin <file.pocket> --target <t> [-o <file>]\n" +
       "  bun tools/pocket-pack.ts verify <file.pocket>",
@@ -66,6 +69,7 @@ export function makeVariant(input: {
   planJson: string;
   identity: { output: string; id: string; title: string };
   js: Uint8Array;
+  workerJs?: Uint8Array;
   pak: Uint8Array;
   cover?: Uint8Array;
 }): PocketPackageVariant {
@@ -88,6 +92,13 @@ export function makeVariant(input: {
     { kind: POCKET_SECTION.pak, bytes: input.pak },
   ];
   if (input.cover) sections.push({ kind: POCKET_SECTION.cover, bytes: input.cover });
+  if (!!plan.domains?.worker !== !!input.workerJs) throw new Error("pocket-pack: worker declaration and worker bundle must both be present");
+  if (input.workerJs) {
+    if (!input.workerJs.length) throw new Error("pocket-pack: worker bundle is empty");
+    const worker = new Uint8Array(input.workerJs.length + 1);
+    worker.set(input.workerJs);
+    sections.push({ kind: POCKET_SECTION.workerJs, bytes: worker });
+  }
   if (plan.profile.platform === "esp-idf") {
     sections.push({
       kind: POCKET_SECTION.hostInputs,
@@ -146,7 +157,7 @@ async function buildCommand(argv: string[]): Promise<void> {
   }
   if (!manifestPath) usage("--manifest is required");
   if (!allTargets && targets.length === 0) usage("give --target (repeatable) or --all-targets");
-  const loaded = readPocketManifest(manifestPath);
+  const loaded = readAuthoredManifest(manifestPath);
   const manifest: unknown = loaded.manifest;
 
   const requested = allTargets ? Object.keys(POCKET_TARGETS) : targets;
@@ -174,15 +185,16 @@ async function buildCommand(argv: string[]): Promise<void> {
         planJson: canonicalJson(plan),
         identity: { output: plan.app.output, id: plan.app.id, title: plan.app.title },
         js,
+        ...(plan.domains?.worker ? { workerJs: new Uint8Array(readFileSync(join(outdir, `${plan.app.output}.worker.js`))) } : {}),
         pak,
-        cover: existsSync(coverPath) ? new Uint8Array(readFileSync(coverPath)) : undefined,
+        cover: loaded.icon ?? (existsSync(coverPath) ? new Uint8Array(readFileSync(coverPath)) : undefined),
       }),
     );
     console.log(`  variant ${target}: js ${js.length}B pak ${pak.length}B`);
   }
   if (variants.length === 0) throw new Error("pocket-pack: no variant admitted — nothing to pack");
 
-  const id = (manifest as { name?: string }).name ?? "app";
+  const id = variants.length ? decodeIdentity(findSection(variants[0]!, POCKET_SECTION.identity)!).output : "app";
   const file = output || join(ROOT, "dist/packages", `${id}.pocket`);
   mkdirSync(dirname(file), { recursive: true });
   const bytes = encodePocketPackage({ manifest: loaded.embedded, variants });
@@ -209,7 +221,10 @@ function inspectCommand(file: string): void {
       3: "js",
       4: "pak",
       5: "cover",
+      6: "bytecode",
       7: "hostInputs",
+      8: "workerJs",
+      9: "workerBc",
     };
     for (const s of v.sections) {
       console.log(`    ${(names[s.kind] ?? `kind${s.kind}`).padEnd(8)} ${s.bytes.length}B`);
@@ -252,7 +267,7 @@ function verifyCommand(file: string): void {
       plan.target.hostAbi !== v.hostAbi || plan.profileHash !== v.profileHash) {
       throw new Error(`verify: variant ${v.target} has inconsistent plan identity`);
     }
-    const resolution = validateAndResolveBuildPlan(manifest, { target: v.target, hostExtension: plan.hostExtension }, profileRegistry(plan.profile));
+    const resolution = validateAndResolveBuildPlan(manifest, { target: v.target, hostExtension: plan.hostExtension }, profileRegistry(planProfileDocument(plan.profile)));
     if (!resolution.ok) throw new Error(`verify: variant ${v.target} is no longer admitted by its own manifest`);
     if (canonicalJson(plan) !== canonicalJson(resolution.plan)) {
       throw new Error(`verify: variant ${v.target} resolved plan drifted from its manifest`);
@@ -272,8 +287,16 @@ function verifyCommand(file: string): void {
       }
     }
     const js = findSection(v, POCKET_SECTION.js);
-    if (!js || js[js.length - 1] !== 0) {
+    if (js && js[js.length - 1] !== 0) {
       throw new Error(`verify: variant ${v.target} js section is not NUL-terminated`);
+    }
+    const bytecode = findSection(v, POCKET_SECTION.bytecode);
+    if (!js && !bytecode) throw new Error(`verify: variant ${v.target} has neither a js nor a bytecode section`);
+    for (const [kind, name] of [[POCKET_SECTION.bytecode, "bytecode"], [POCKET_SECTION.workerBytecode, "worker bytecode"]] as const) {
+      const section = findSection(v, kind);
+      if (!section) continue;
+      try { decodeBytecodeEnvelope(section); }
+      catch (error) { throw new Error(`verify: variant ${v.target} ${name} section: ${error instanceof Error ? error.message : String(error)}`); }
     }
   }
   console.log(`verify: OK — footer hash, ${pkg.variants.length} variant(s) re-admitted`);

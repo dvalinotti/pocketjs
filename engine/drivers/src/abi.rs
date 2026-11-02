@@ -120,6 +120,7 @@ pub const POCKET_STATUS_OK: i32 = 0;
 pub const POCKET_STATUS_UNSUPPORTED: i32 = -1;
 pub const POCKET_STATUS_INVALID: i32 = -2;
 pub const POCKET_STATUS_FAILED: i32 = -3;
+pub const POCKET_PACKAGE_STORAGE_VERIFIED: u32 = 1;
 pub const POCKET_RENDERER_SOFTWARE: u32 = 0;
 pub const POCKET_RENDERER_INVALID: u32 = 4294967295;
 pub const POCKET_ARG_INTEGER: u32 = 1;
@@ -187,6 +188,12 @@ pub type PocketPackageAllFn = unsafe extern "C" fn(context: *mut c_void, bytes: 
 
 pub type PocketPackageRangeFn = unsafe extern "C" fn(context: *mut c_void, offset: usize, buffer: *mut u8, capacity: usize, read: *mut usize) -> i32;
 
+/// Transfers the whole package: out describes storage of the length the length callback reported. After success the source may refuse all and range. UNSUPPORTED keeps the copying path.
+pub type PocketPackageTakeFn = unsafe extern "C" fn(context: *mut c_void, out: *mut PocketPackageStorage) -> i32;
+
+/// Releases storage a take transferred, after the runtime's last read of it.
+pub type PocketPackageReleaseFn = unsafe extern "C" fn(context: *mut c_void, bytes: *const u8, length: usize) -> ();
+
 /// Monotonic microseconds.
 pub type PocketClockNowFn = unsafe extern "C" fn(context: *mut c_void) -> u64;
 
@@ -200,6 +207,9 @@ pub type PocketDrawOpVisitFn = unsafe extern "C" fn(context: *mut c_void, operat
 pub type PocketGuestInitializeFn = unsafe extern "C" fn(context: *mut c_void, runtime: *mut PocketRuntime, environment: *const PocketGuestEnvironment) -> i32;
 
 pub type PocketGuestEvaluateFn = unsafe extern "C" fn(context: *mut c_void, runtime: *mut PocketRuntime, code: *const u8, length: usize) -> i32;
+
+/// Optional. code is a package bytecode section: a 48-byte QJBC envelope with the engine-ABI digest at byte 16, then the serialized QuickJS object. UNSUPPORTED when the guest has no engine ABI or the digest is another build's; the runtime then evaluates the source section when the package has one. Any other error is the program's: the realm may have run, and no source is evaluated after it.
+pub type PocketGuestEvaluateBytecodeFn = unsafe extern "C" fn(context: *mut c_void, runtime: *mut PocketRuntime, code: *const u8, length: usize) -> i32;
 
 pub type PocketGuestFrameFn = unsafe extern "C" fn(context: *mut c_void, frame: *const PocketGuestFrame) -> i32;
 
@@ -583,12 +593,25 @@ abi_record! {
 }
 
 abi_record! {
-    /// all is optional; range supports sources without contiguous storage. Returned all bytes remain borrowed until the next call on this source.
+    /// Storage a source transfers through take. bytes stay valid and unchanged until the runtime calls release with release_context, bytes and length; a null release means they outlive the runtime. POCKET_PACKAGE_STORAGE_VERIFIED in flags states that the owner verified the package's FNV-1a64 footer and variant hashes of these exact bytes, so the runtime admits them without its own hash pass.
+    pub struct PocketPackageStorage {
+        pub struct_size: usize,
+        pub bytes: *const u8,
+        pub length: usize,
+        pub release: Option<PocketPackageReleaseFn>,
+        pub release_context: *mut c_void,
+        pub flags: u32,
+    }
+}
+
+abi_record! {
+    /// all and take are optional; range supports sources without contiguous storage. Returned all bytes remain borrowed until the next call on this source. take transfers the package without a copy; without it, or when it returns UNSUPPORTED, the runtime copies the bytes through all or range.
     pub struct PocketPackageSourceV1 {
         pub struct_size: usize,
         pub length: Option<PocketPackageLengthFn>,
         pub all: Option<PocketPackageAllFn>,
         pub range: Option<PocketPackageRangeFn>,
+        pub take: Option<PocketPackageTakeFn>,
     }
 }
 
@@ -644,7 +667,7 @@ abi_record! {
 }
 
 abi_record! {
-    /// The software facts the runtime admits packages against, exported by pocket profile export from the profile the application was compiled for. id is the package variant name; input_classes are the POCKET_INPUT_CLASS_* bits the profile's capabilities require. Null auxiliary and dynamic_viewport mean absent.
+    /// The facts the runtime admits packages against, exported by pocket host export from the program's host contract. id is the host's profile id; admission does not compare it. tick_hz is the highest cadence. cadences lists cadence_count presented frames per second; a record without them has the one cadence tick_hz. capabilities and presentations are names, each terminated by NUL, in capabilities_length and presentations_length bytes; a record without capabilities provides none, and one without presentations or animation is not compared on them. input_classes are the POCKET_INPUT_CLASS_* bits the profile's capabilities require. Null auxiliary and dynamic_viewport mean absent.
     pub struct PocketProfileFacts {
         pub struct_size: usize,
         pub id: *const u8,
@@ -654,6 +677,14 @@ abi_record! {
         pub display: *const PocketProfileDisplay,
         pub auxiliary: *const PocketProfileDisplay,
         pub dynamic_viewport: *const PocketProfileRange,
+        pub cadences: *const u32,
+        pub cadence_count: usize,
+        pub capabilities: *const u8,
+        pub capabilities_length: usize,
+        pub presentations: *const u8,
+        pub presentations_length: usize,
+        pub animation: *const u8,
+        pub animation_length: usize,
     }
 }
 
@@ -704,7 +735,7 @@ abi_record! {
 }
 
 abi_record! {
-    /// Metadata borrows last through initialize; pak storage remains unchanged through guest shutdown. Zero auxiliary dimensions mean no auxiliary viewport.
+    /// Metadata borrows last through initialize; pak storage remains unchanged through guest shutdown. Zero auxiliary dimensions mean no auxiliary viewport. tick_hz is the admitted package's rate; sim_hz is the host cadence, guest frames per second, published to the guest as globalThis.__simHz.
     pub struct PocketGuestEnvironment {
         pub struct_size: usize,
         pub host: *const u8,
@@ -725,6 +756,17 @@ abi_record! {
         pub sprites: *const PocketNamedSprite,
         pub sprite_count: usize,
         pub assets_present: u32,
+        pub sim_hz: u32,
+    }
+}
+
+abi_record! {
+    /// The booted package's rate, the host cadence it is presented at, and the core ticks each pocket_runtime_tick advances (tick_hz / cadence_hz).
+    pub struct PocketRuntimeTiming {
+        pub struct_size: usize,
+        pub tick_hz: u32,
+        pub cadence_hz: u32,
+        pub core_ticks: u32,
     }
 }
 
@@ -768,6 +810,7 @@ abi_record! {
         pub collect: Option<PocketGuestCollectFn>,
         pub shutdown: Option<PocketGuestShutdownFn>,
         pub initialize: Option<PocketGuestInitializeFn>,
+        pub evaluate_bytecode: Option<PocketGuestEvaluateBytecodeFn>,
     }
 }
 
@@ -791,6 +834,8 @@ pub fn pocket_tick_schedule_poll(schedule: *mut PocketTickSchedule, now: u64, ou
     pub fn pocket_runtime_create(config: *const PocketRuntimeConfig) -> *mut PocketRuntime;
     pub fn pocket_runtime_set_package_source(runtime: *mut PocketRuntime, source: *const PocketPackageSourceV1, context: *mut c_void) -> i32;
     pub fn pocket_runtime_set_guest(runtime: *mut PocketRuntime, guest: *const PocketGuestV1, context: *mut c_void) -> i32;
+    /// Decoded bytes of package textures the runtime keeps past a frame; zero, the default, keeps every texture. Beyond it, when a frame is drawn, textures the previous frame did not draw are released, least recently drawn first, and decoded from the package again by the next frame that draws them. Textures a deferred submission still reads stay.
+pub fn pocket_runtime_set_texture_budget(runtime: *mut PocketRuntime, bytes: usize) -> i32;
     pub fn pocket_runtime_add_renderer(runtime: *mut PocketRuntime, renderer: *const PocketRendererV1, context: *mut c_void) -> PocketRendererId;
     pub fn pocket_runtime_add_display(runtime: *mut PocketRuntime, display: *const PocketDisplayOutputV1, context: *mut c_void, renderer: PocketRendererId) -> i32;
     pub fn pocket_runtime_add_input_source(runtime: *mut PocketRuntime, source: *const PocketInputSourceV1, context: *mut c_void) -> i32;
@@ -802,7 +847,10 @@ pub fn pocket_runtime_boot_deferred(runtime: *mut PocketRuntime) -> i32;
 pub fn pocket_runtime_present(runtime: *mut PocketRuntime) -> i32;
     /// Complete in-flight DEFERRED frames: renderer wait, flush or display wait, retire. Returns zero when none is pending. A failed completion returns its error once and invalidates that display's damage history. Call before reading a presented buffer or releasing state a pending submission reads.
 pub fn pocket_runtime_complete_presentation(runtime: *mut PocketRuntime) -> i32;
-    pub fn pocket_runtime_tick(runtime: *mut PocketRuntime) -> i32;
+    /// Sample inputs, run the guest frame once, advance the core by the booted package's core_ticks, and present.
+pub fn pocket_runtime_tick(runtime: *mut PocketRuntime) -> i32;
+    /// After boot, the package rate and the cadence the program schedules pocket_runtime_tick at. INVALID before boot.
+pub fn pocket_runtime_get_timing(runtime: *const PocketRuntime, out: *mut PocketRuntimeTiming) -> i32;
     /// Returns 0 or 1 without executing the operation. Does not invalidate borrowed results.
 pub fn pocket_runtime_supports_op(runtime: *const PocketRuntime, op: u16) -> u32;
     /// Generated bindings use this operation dispatcher. out bytes expire at the next call on runtime.

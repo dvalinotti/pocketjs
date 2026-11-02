@@ -2,6 +2,7 @@ import { resolveSourceEntry, sourceAppContent, sourceOutputName } from "./source
 import { resolveSolidAotModel } from "../microts/compiler/aot-solid-browser.ts";
 import { modelConfiguration } from "../microts/compiler/aot-model-build.ts";
 import { BuildInputs } from "../framework/compiler/build-inputs.ts";
+import { buildWorker } from "./build-worker.ts";
 // tools/build.ts <app> — the TWO-PASS app build (docs/DESIGN.md "Build pipeline").
 //
 //   bun tools/build.ts apps/hero/app.tsx    (or just `hero`)
@@ -15,7 +16,7 @@ import { BuildInputs } from "../framework/compiler/build-inputs.ts";
 //         placeholder); pak.ts packs it all -> dist/<app>.pak.
 // pass 2  Bun.build (plugin serves the CACHED pass-1 transforms plus this
 //         build's in-memory generated styles, iife, target browser,
-//         minify false) -> dist/<app>.js.
+//         minify off unless POCKETJS_MINIFY=1) -> dist/<app>.js.
 //
 // Flags:
 //   --framework=solid|vue-vapor|octane  select the framework for this build
@@ -105,7 +106,7 @@ for (const a of args) {
   else if (a.startsWith("--font-bold=")) boldFontPath = resolvePath(a.slice("--font-bold=".length));
   else if (a.startsWith("--framework=")) frameworkFlag = a.slice("--framework=".length);
   else if (a === "--config" || a.startsWith("--config=") || a === "--no-config") {
-    throw new Error("PocketJS build: application configuration belongs in pocket.json; --config and --no-config were removed");
+    throw new Error("PocketJS build: application configuration belongs in pocket.app.json; --config and --no-config were removed");
   }
   else if (a.startsWith("--plan=")) planPath = resolvePath(a.slice("--plan=".length));
   else if (a.startsWith("--project-root=")) projectRoot = resolvePath(a.slice("--project-root=".length));
@@ -133,7 +134,7 @@ if (planPath) {
   // Model lowering reads the application's manifest before transform caching.
   // A frozen plan must reject a later change to that compiler configuration.
   const model = modelConfiguration(appArg);
-  const currentApp = model.directory ? (await Bun.file(join(model.directory, "pocket.json")).json()).app ?? {} : {};
+  const currentApp = model.directory ? (await Bun.file(join(model.directory, "pocket.app.json")).json()).app ?? {} : {};
   if ((currentApp.aot === true) !== (buildPlan.app.aot === true)
     || model.mode !== (buildPlan.app.model ?? "rust")
     || model.recursionLimit !== (buildPlan.app.recursionLimit ?? 256)
@@ -152,9 +153,14 @@ buildInputs.optional(join(projectRoot, "tsconfig.json"));
 // The public compiler passes a frozen plan. Low-level source builds read the
 // matching application manifest so they bake the same application theme.
 if (!buildPlan) modelConfiguration(requestedEntry);
-const appContent = buildPlan ? buildPlan.app : sourceAppContent(requestedEntry, {
+let appProjectRoot = projectRoot;
+const sourceContent = buildPlan ? undefined : sourceAppContent(requestedEntry, {
   frameworkRoot: ROOT, projectRoot, onRead: path => buildInputs.add(path),
+  onAppRoot: path => { appProjectRoot = path; },
 });
+const appContent = buildPlan ? buildPlan.app : sourceContent!;
+/** The worker domain: the frozen plan's, or the source manifest's. */
+const workerDeclaration = buildPlan ? buildPlan.domains?.worker : sourceContent?.domains?.worker;
 if (appContent.theme !== undefined) {
   const diagnostics: ContractDiagnostic[] = [];
   validateSchema(appContent.theme, animationThemeSchema, "/app/theme", diagnostics);
@@ -162,7 +168,7 @@ if (appContent.theme !== undefined) {
 }
 const framework: PocketFramework = frameworkFlag
   ? parseFramework(frameworkFlag, "--framework")
-  : parseFramework(appContent.framework, buildPlan ? "ResolvedBuildPlan" : "pocket.json");
+  : parseFramework(appContent.framework, buildPlan ? "ResolvedBuildPlan" : "pocket.app.json");
 const frameworkConfig = FRAMEWORKS[framework];
 const entry = frameworkVariantPath(requestedEntry, framework);
 const appName = buildPlan?.app.output ?? sourceOutputName(requestedEntry, ROOT);
@@ -525,6 +531,8 @@ const result = await Bun.build({
     __POCKET_TARGET__: JSON.stringify(buildPlan?.target.id ?? ""),
     __POCKET_HOST_ABI__: String(buildPlan?.target.hostAbi ?? POCKET_BINDING_GENERATION),
     __POCKET_FEATURES__: JSON.stringify(buildPlan?.features ?? {}),
+    __POCKET_DOMAIN__: '"ui"',
+    __POCKET_WORKER_DECLARATION__: JSON.stringify(workerDeclaration ?? null),
     // The modality and presentation the plan resolved; the runtime module
     // (@pocketjs/framework/modality) falls back to the portable PSP shape
     // when a bundle is built without a plan.
@@ -539,7 +547,7 @@ const result = await Bun.build({
       ? { document: "globalThis.__pocketDocument" }
       : {}),
   },
-  minify: false,
+  minify: process.env.POCKETJS_MINIFY === "1",
   metafile: true,
   sourcemap: "none",
   plugins: [jsxPlugin(framework, {
@@ -554,6 +562,11 @@ if (!result.success) {
   process.exit(1);
 }
 const bundle = result.outputs.find((o) => o.path.endsWith(".js"));
+if (workerDeclaration) {
+  const worker = await buildWorker({ declaration: workerDeclaration, projectRoot: appProjectRoot, outdir: DIST, output: outName });
+  buildInputs.metafile(worker.metafile);
+  console.log(`  worker: ${DIST}${outName}.worker.js`);
+}
 if (inputsFile) {
   buildInputs.metafile(result.metafile);
   await buildInputs.compiler([join(ROOT, "tools/build.ts"), join(ROOT, "tools/pocket.ts")], ROOT);
