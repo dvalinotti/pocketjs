@@ -105,7 +105,7 @@ screen.
   other program inherits a dark top screen. The chord, the microphone and
   the mirror capture work as in dual mode.
 - **The framework** exports `displayMode()` and `setDisplayMode(mode)` from
-  `@pocketjs/framework/agent`; Pocket Home's Settings has the switch.
+  `@pocketjs/framework/agent`; Pocket Shell's Settings has the switch.
 
 ## The host's agent channel
 
@@ -310,10 +310,9 @@ keeps waiting for the console to come back.
 catalog's `.pocket` file (extracted to `<store>/own/`) in the sim host with
 the 3DS geometry (`programs/sim/console-3ds.ts`), in a child process, since the
 sim replaces process globals. The child steps the app at 60 frames a second
-of wall time; its NET module is the companion's own fetch, with the link's
-destination policy. Actions queue touch and button frames, then wait
-`AGENT_SETTLE_FRAMES` frames and while requests are in flight (at most 4 s
-more). The report's texts come from the sim's tree in reading order. The
+of wall time; it has no network module. Actions queue touch and button
+frames, then wait `AGENT_SETTLE_FRAMES` frames and four more. The report's
+texts come from the sim's tree in reading order. The
 first own-screen call boots the app on the user's screen; `launch` boots
 another. `type` is not available there yet.
 

@@ -10,6 +10,8 @@
 
 use core::str;
 
+use crate::admission::{admit_plan, HostFacts, Mismatch, Timing};
+
 use crate::package_format::{
     OFFSET_HEADER_STRING_TABLE_OFFSET, OFFSET_HEADER_STRING_TABLE_SIZE, OFFSET_SECTION_OFFSET,
     OFFSET_SECTION_SIZE, OFFSET_VARIANT_HASH, OFFSET_VARIANT_HOST_ABI, OFFSET_VARIANT_PROFILE_HASH,
@@ -25,8 +27,9 @@ pub use crate::package_format::{POCKET_MAGIC as MAGIC, POCKET_VERSION as VERSION
 /// Section kinds (append-only; skip what you do not know).
 pub mod section {
     pub use crate::package_format::{
-        SECTION_COVER as COVER, SECTION_IDENTITY as IDENTITY, SECTION_JS as JS, SECTION_PAK as PAK,
-        SECTION_PLAN as PLAN,
+        SECTION_BYTECODE as BYTECODE, SECTION_COVER as COVER, SECTION_IDENTITY as IDENTITY,
+        SECTION_JS as JS, SECTION_PAK as PAK, SECTION_PLAN as PLAN,
+        SECTION_WORKER_BYTECODE as WORKER_BYTECODE, SECTION_WORKER_JS as WORKER_JS,
     };
 }
 
@@ -43,13 +46,19 @@ pub enum PackageError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuestError {
     Package(PackageError),
+    /// The package carries no variant.
     MissingVariant,
-    HostAbiMismatch,
-    ProfileHashMismatch,
+    /// No variant is admitted by the host's facts; the closest one and the
+    /// items it fails (`crate::admission`).
+    NotAdmitted(Mismatch),
     MissingIdentity,
-    MissingPlan,
     MissingJavaScript,
     JavaScriptNotTerminated,
+    /// The plan's `domains.worker` and sections 8 and 9 disagree: a declaration
+    /// without a worker bundle, or a bundle without a declaration.
+    WorkerSectionMismatch,
+    /// Section 6 or 9 is not a bytecode envelope (`crate::bytecode`).
+    BadBytecode,
 }
 
 impl From<PackageError> for GuestError {
@@ -88,9 +97,24 @@ pub struct Identity<'a> {
 /// A filesystem package admitted for one native host. The package allocation
 /// must outlive these slices; native runtimes keep it until guest teardown.
 pub struct Guest<'a> {
+    /// The admitted variant's target name, as compiled.
+    pub target: &'a str,
     /// The variant identity's application id (`app.id` of its plan).
     pub id: &'a str,
+    /// The package rate and the host cadence it runs at.
+    pub timing: Timing,
+    /// Section 3, the NUL-terminated UI bundle; empty when the variant
+    /// carries the bundle as bytecode alone.
     pub js: &'a [u8],
+    /// Section 8, the NUL-terminated worker bundle of a plan with
+    /// `domains.worker`; empty for a plan without one, or one whose worker
+    /// bundle is bytecode alone.
+    pub worker_js: &'a [u8],
+    /// Section 6, the UI bundle as a bytecode envelope (`crate::bytecode`),
+    /// when the variant carries one.
+    pub bytecode: Option<&'a [u8]>,
+    /// Section 9, the worker bundle as a bytecode envelope.
+    pub worker_bytecode: Option<&'a [u8]>,
     pub pak: &'a [u8],
     pub plan: &'a [u8],
     pub package_hash: u64,
@@ -139,7 +163,8 @@ pub fn fnv1a64(chunks: &[&[u8]]) -> u64 {
 impl<'a> Package<'a> {
     /// Parse the canonical v2 layout and verify its footer and variant hashes.
     /// `skip_hash` skips only FNV checks, for metadata inspection after an
-    /// independent integrity check. Runtime admission always verifies them.
+    /// independent integrity check. Runtime admission verifies them unless
+    /// the owner of transferred storage did (`PackageSource::verified`).
     pub fn parse(bytes: &'a [u8], skip_hash: bool) -> Result<Self, PackageError> {
         if bytes.len() < HEADER_SIZE + 8 {
             return Err(PackageError::Truncated);
@@ -254,7 +279,7 @@ impl<'a> Package<'a> {
         Ok(package)
     }
 
-    /// pocket.json bytes, verbatim.
+    /// pocket.app.json bytes, verbatim.
     pub fn manifest(&self) -> &'a [u8] {
         &self.bytes[HEADER_SIZE..HEADER_SIZE + self.manifest_len]
     }
@@ -308,48 +333,116 @@ impl<'a> Package<'a> {
     }
 }
 
-/// Parse a package and admit its guest payload for an exact target, host ABI
-/// and independently supplied program profile hash.
-/// This is the shared boundary filesystem-loading hosts use before exposing
-/// any package bytes to QuickJS or the retained UI core.
-pub fn select_guest<'a>(
+/// Parse a package and admit the guest payload of the first variant the
+/// host's facts satisfy (`crate::admission`). Variants whose profile hash
+/// equals the host's are tried first. This is the shared boundary
+/// filesystem-loading hosts use before exposing any package bytes to
+/// QuickJS or the retained UI core.
+pub fn select_guest<'a, S: AsRef<str>>(
     bytes: &'a [u8],
-    target: &str,
-    host_abi: u32,
-    expected_profile_hash: &[u8; 32],
+    host: &HostFacts<'_, S>,
     skip_hash: bool,
 ) -> Result<Guest<'a>, GuestError> {
     let package = Package::parse(bytes, skip_hash)?;
-    let variant = package
-        .find_variant(target)?
-        .ok_or(GuestError::MissingVariant)?;
-    if variant.host_abi != host_abi {
-        return Err(GuestError::HostAbiMismatch);
+    if package.variant_count() == 0 {
+        return Err(GuestError::MissingVariant);
     }
-    if variant.profile_hash != *expected_profile_hash {
-        return Err(GuestError::ProfileHashMismatch);
+    let mut closest: Option<Mismatch> = None;
+    for preferred in [true, false] {
+        for index in 0..package.variant_count() {
+            let variant = package.variant(index)?;
+            if (variant.profile_hash == host.profile_hash) != preferred {
+                continue;
+            }
+            let plan = variant.section(section::PLAN)?;
+            match admit_plan(host, variant.host_abi, plan) {
+                Ok(timing) => return admitted(&package, variant, timing),
+                Err((items, capability)) => {
+                    if closest.is_none_or(|best| items.count_ones() < best.items.count_ones()) {
+                        closest = Some(Mismatch {
+                            variant: index as u32,
+                            items,
+                            capability,
+                        });
+                    }
+                }
+            }
+        }
     }
+    Err(GuestError::NotAdmitted(
+        closest.expect("a package with variants reports one"),
+    ))
+}
+
+fn admitted<'a>(
+    package: &Package<'a>,
+    variant: Variant<'a>,
+    timing: Timing,
+) -> Result<Guest<'a>, GuestError> {
     let identity = variant.identity()?.ok_or(GuestError::MissingIdentity)?;
-    let plan = variant
-        .section(section::PLAN)?
-        .filter(|value| !value.is_empty())
-        .ok_or(GuestError::MissingPlan)?;
-    let js = variant
-        .section(section::JS)?
-        .filter(|value| !value.is_empty())
-        .ok_or(GuestError::MissingJavaScript)?;
-    if js.last() != Some(&0) {
-        return Err(GuestError::JavaScriptNotTerminated);
-    }
+    // Admission read this section; it is present and non-empty.
+    let plan = variant.section(section::PLAN)?.unwrap_or(&[]);
+    let bytecode = envelope_section(variant.section(section::BYTECODE)?)?;
+    let js = match (
+        variant
+            .section(section::JS)?
+            .filter(|value| !value.is_empty()),
+        bytecode,
+    ) {
+        (Some(js), _) if js.last() != Some(&0) => return Err(GuestError::JavaScriptNotTerminated),
+        (Some(js), _) => js,
+        (None, Some(_)) => &[],
+        (None, None) => return Err(GuestError::MissingJavaScript),
+    };
+    let worker_bytecode = envelope_section(variant.section(section::WORKER_BYTECODE)?)?;
+    let worker_js = worker_payload(
+        plan,
+        variant.section(section::WORKER_JS)?,
+        worker_bytecode.is_some(),
+    )?;
     let pak = variant.section(section::PAK)?.unwrap_or(&[]);
     Ok(Guest {
+        target: variant.target,
         id: identity.id,
+        timing,
         js,
+        worker_js,
+        bytecode,
+        worker_bytecode,
         pak,
         plan,
         package_hash: package.package_hash()?,
         variant_hash: variant.variant_hash,
     })
+}
+
+/// A bytecode section, checked to be an envelope.
+fn envelope_section(bytes: Option<&[u8]>) -> Result<Option<&[u8]>, GuestError> {
+    match bytes {
+        Some(bytes) => crate::bytecode::parse(bytes)
+            .map(|_| Some(bytes))
+            .map_err(|_| GuestError::BadBytecode),
+        None => Ok(None),
+    }
+}
+
+/// The worker bundle a plan with `domains.worker` requires, or an empty slice
+/// for a plan without one, or for one whose bundle is bytecode alone
+/// (`has_bytecode`). The bundle ends with NUL like the UI JavaScript.
+fn worker_payload<'a>(
+    plan: &[u8],
+    worker: Option<&'a [u8]>,
+    has_bytecode: bool,
+) -> Result<&'a [u8], GuestError> {
+    let declared = crate::plan_facts::worker_declared(plan)
+        .map_err(|_| GuestError::Package(PackageError::BadLayout))?;
+    match (declared, worker) {
+        (false, None) if !has_bytecode => Ok(&[]),
+        (true, Some(source)) if source.len() >= 2 && source.last() == Some(&0) => Ok(source),
+        (true, Some(_)) => Err(GuestError::JavaScriptNotTerminated),
+        (true, None) if has_bytecode => Ok(&[]),
+        _ => Err(GuestError::WorkerSectionMismatch),
+    }
 }
 
 impl<'a> Variant<'a> {
@@ -403,8 +496,8 @@ mod tests {
 
     #[test]
     fn shared_malformed_corpus() {
-        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/corpus");
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/corpus");
         for entry in std::fs::read_dir(directory).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().and_then(|v| v.to_str()) != Some("pocket") {
@@ -428,6 +521,73 @@ mod tests {
     static FIXTURE: &[u8] = include_bytes!("../tests/fixtures/synthetic.pocket");
 
     #[test]
+    fn bytecode_sections_admit_beside_or_instead_of_source() {
+        use crate::admission::testing::{host, PLAN};
+        use crate::embedded::{encode_sections, identity};
+        let identity = identity("app", "test.app", "App").unwrap();
+        let envelope = crate::bytecode::encode(&[0x11; 32], &[25, 7, 7]);
+        let js: &[u8] = b"globalThis.frame=()=>{}\0";
+        let encode =
+            |sections: &[(u32, &[u8])]| encode_sections("psp", 1, [0x11; 32], sections).unwrap();
+        let both = encode(&[
+            (section::IDENTITY, &identity),
+            (section::PLAN, PLAN),
+            (section::JS, js),
+            (section::PAK, b""),
+            (section::BYTECODE, &envelope),
+        ]);
+        let guest = select_guest(&both, &host(1, [0x11; 32]), false).unwrap();
+        assert_eq!(guest.js, js);
+        assert_eq!(guest.bytecode, Some(&envelope[..]));
+        assert_eq!(guest.worker_bytecode, None);
+        let alone = encode(&[
+            (section::IDENTITY, &identity),
+            (section::PLAN, PLAN),
+            (section::PAK, b""),
+            (section::BYTECODE, &envelope),
+        ]);
+        let guest = select_guest(&alone, &host(1, [0x11; 32]), false).unwrap();
+        assert!(guest.js.is_empty());
+        assert_eq!(guest.bytecode, Some(&envelope[..]));
+        let neither = encode(&[
+            (section::IDENTITY, &identity),
+            (section::PLAN, PLAN),
+            (section::PAK, b""),
+        ]);
+        assert_eq!(
+            select_guest(&neither, &host(1, [0x11; 32]), false)
+                .err()
+                .unwrap(),
+            GuestError::MissingJavaScript
+        );
+        let damaged = encode(&[
+            (section::IDENTITY, &identity),
+            (section::PLAN, PLAN),
+            (section::JS, js),
+            (section::BYTECODE, &envelope[..crate::bytecode::HEADER_SIZE]),
+        ]);
+        assert_eq!(
+            select_guest(&damaged, &host(1, [0x11; 32]), false)
+                .err()
+                .unwrap(),
+            GuestError::BadBytecode
+        );
+        // A worker bundle as bytecode needs the plan's declaration, as source does.
+        let undeclared = encode(&[
+            (section::IDENTITY, &identity),
+            (section::PLAN, PLAN),
+            (section::JS, js),
+            (section::WORKER_BYTECODE, &envelope),
+        ]);
+        assert_eq!(
+            select_guest(&undeclared, &host(1, [0x11; 32]), false)
+                .err()
+                .unwrap(),
+            GuestError::WorkerSectionMismatch
+        );
+    }
+
+    #[test]
     fn tamper_trips_the_footer_hash() {
         let mut evil = FIXTURE.to_vec();
         let n = evil.len();
@@ -442,7 +602,12 @@ mod tests {
     #[test]
     fn a_changed_payload_byte_trips_the_variant_hash() {
         let package = Package::parse(FIXTURE, false).unwrap();
-        let js = package.variant(0).unwrap().section(section::JS).unwrap().unwrap();
+        let js = package
+            .variant(0)
+            .unwrap()
+            .section(section::JS)
+            .unwrap()
+            .unwrap();
         let offset = js.as_ptr() as usize - FIXTURE.as_ptr() as usize;
         let mut evil = FIXTURE.to_vec();
         evil[offset] ^= 0x01;
@@ -470,23 +635,127 @@ mod tests {
         );
     }
 
-    #[test]
-    fn admits_a_complete_guest_for_an_exact_host() {
-        let guest = select_guest(FIXTURE, "psp", 1, &[0x11; 32], false).unwrap();
-        assert_eq!(guest.js.last(), Some(&0));
-        assert!(!guest.id.is_empty());
-        assert!(!guest.plan.is_empty());
+    use crate::admission::testing::host;
+    use crate::admission::{HostFacts, Timing};
+
+    const PLAN: &[u8] = br#"{"animation":"composited","features":{"input.buttons":true},"profile":{"tickHz":60},"viewport":{"logical":[480,272],"presentation":"native","rasterDensity":1}}"#;
+
+    fn package(target: &str, generation: u32, hash: [u8; 32], plan: &[u8]) -> std::vec::Vec<u8> {
+        let identity = crate::embedded::identity("app", "test.app", "App").unwrap();
+        crate::embedded::encode(crate::embedded::EmbeddedPackage {
+            target,
+            host_abi: generation,
+            profile_hash: hash,
+            identity: &identity,
+            plan,
+            code: b"globalThis.frame=()=>{}",
+            pak: &[],
+        })
+        .unwrap()
     }
 
     #[test]
-    fn rejects_target_and_host_abi_drift() {
-        assert!(matches!(
-            select_guest(FIXTURE, "3ds-dev", 8, &[0x11; 32], false),
-            Err(GuestError::MissingVariant)
-        ));
-        assert!(matches!(
-            select_guest(FIXTURE, "psp", 8, &[0x11; 32], false),
-            Err(GuestError::HostAbiMismatch)
-        ));
+    fn admits_a_complete_guest_for_a_satisfying_host() {
+        let bytes = package("compiled-for", 12, [0x22; 32], PLAN);
+        let guest = select_guest(&bytes, &host(12, [0x11; 32]), false).unwrap();
+        assert_eq!(guest.js.last(), Some(&0));
+        assert_eq!(guest.id, "test.app");
+        assert_eq!(guest.plan, PLAN);
+        assert!(guest.worker_js.is_empty());
+        assert_eq!(guest.target, "compiled-for");
+        assert_eq!(
+            guest.timing,
+            Timing {
+                tick_hz: 60,
+                cadence_hz: 60
+            }
+        );
+    }
+
+    #[test]
+    fn reports_binding_generation_drift() {
+        let bytes = package("compiled-for", 11, [0x11; 32], PLAN);
+        match select_guest(&bytes, &host(12, [0x11; 32]), false) {
+            Err(GuestError::NotAdmitted(mismatch)) => {
+                assert_eq!(mismatch.items, crate::admission::item::BINDING_GENERATION)
+            }
+            other => panic!("{:?}", other.err()),
+        }
+    }
+
+    #[test]
+    fn plans_without_admission_facts_are_not_admitted() {
+        match select_guest(FIXTURE, &host(1, [0x11; 32]), false) {
+            Err(GuestError::NotAdmitted(mismatch)) => {
+                assert_eq!(mismatch.items, crate::admission::item::PLAN)
+            }
+            other => panic!("{:?}", other.err()),
+        }
+    }
+
+    #[test]
+    fn worker_payload_requires_matching_entry_feature_and_terminated_code() {
+        let plan =
+            br#"{"domains":{"worker":{"entry":"worker.ts"}},"features":{"runtime.worker":true}}"#;
+        assert_eq!(
+            worker_payload(plan, Some(b"turn();\0"), false),
+            Ok(&b"turn();\0"[..])
+        );
+        assert_eq!(
+            worker_payload(plan, None, false),
+            Err(GuestError::WorkerSectionMismatch)
+        );
+        assert_eq!(
+            worker_payload(plan, Some(b"\0"), false),
+            Err(GuestError::JavaScriptNotTerminated)
+        );
+        assert_eq!(
+            worker_payload(plan, Some(b"turn();"), false),
+            Err(GuestError::JavaScriptNotTerminated)
+        );
+        assert_eq!(
+            worker_payload(b"{}", Some(b"turn();\0"), false),
+            Err(GuestError::WorkerSectionMismatch)
+        );
+        assert_eq!(
+            worker_payload(
+                br#"{"features":{"runtime.worker":true}}"#,
+                Some(b"turn();\0"),
+                false
+            ),
+            Err(GuestError::WorkerSectionMismatch)
+        );
+        assert_eq!(
+            worker_payload(br#"{"features":{"runtime.worker":true}}"#, None, false),
+            Ok(&[][..])
+        );
+        assert_eq!(
+            worker_payload(
+                br#"{"domains":{"worker":{"entry":"worker.ts"}}}"#,
+                Some(b"turn();\0"),
+                false
+            ),
+            Err(GuestError::Package(PackageError::BadLayout))
+        );
+        assert_eq!(worker_payload(b"{}", None, false), Ok(&[][..]));
+    }
+
+    #[test]
+    fn admission_refuses_required_worker_without_worker_section() {
+        let identity = crate::embedded::identity("worker", "app.worker", "Worker").unwrap();
+        let bytes = crate::embedded::encode(crate::embedded::EmbeddedPackage {
+            target: "test-worker", host_abi: 7, profile_hash: [0x55; 32],
+            identity: &identity,
+            plan: br#"{"animation":"composited","domains":{"worker":{"entry":"worker.ts"}},"features":{"runtime.worker":true},"profile":{"tickHz":60},"viewport":{"logical":[480,272],"presentation":"native","rasterDensity":1}}"#,
+            code: b"globalThis.frame=()=>{}", pak: &[],
+        }).unwrap();
+        let facts = HostFacts {
+            capabilities: &["runtime.worker"],
+            ..host(7, [0x55; 32])
+        };
+        assert_eq!(
+            select_guest(&bytes, &facts, false).err(),
+            Some(GuestError::WorkerSectionMismatch)
+        );
     }
 }

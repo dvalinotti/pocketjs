@@ -267,7 +267,7 @@ describe("link", () => {
   test("pair: the console receives the key the companion stored", async () => {
     const client = await pairOnce();
     expect(client.companionName).toBe("Test Mac");
-    expect(client.features).toEqual(["net", "catalog", "install"]);
+    expect(client.features).toEqual(["catalog", "install", "net.stream"]);
     expect(client.key).toMatch(/^[0-9a-f]{64}$/);
     const stored = store.console(DEVICE.id)!;
     expect(stored.key).toBe(client.key);
@@ -492,7 +492,17 @@ describe("link", () => {
       expect(status.consoles.map((c) => c.id)).toEqual([DEVICE.id]);
       expect(status.paired.map((p) => p.id)).toContain(DEVICE.id);
       expect(JSON.stringify(status)).not.toContain(key);
-      expect(status.apps.length).toBe(2);
+      // The PSP-only package is offered too: a PSP links to the computer it is plugged into.
+      expect(status.apps.map((app) => app.id)).toEqual(["dev.pocket-nexus.clock", "dev.pocket-nexus.hn", "dev.pocket-nexus.psp"]);
+      expect(status.apps.every((app) => Array.isArray(app.services))).toBe(true);
+
+      // The setup screens' view: every service's state, and no credential in it.
+      const setup = await controlRequest<{ services: Record<string, Record<string, unknown>>; agent: Record<string, unknown> }>(info, "GET", "/services");
+      expect(setup.services.x).toMatchObject({ signedIn: false, signingIn: false });
+      expect(setup.services.discord).toEqual({ configured: false });
+      expect(setup.services.youtube).toMatchObject({ managed: false, install: { state: "idle" } });
+      expect(setup.services.glyphs).toBeUndefined();
+      expect(Object.keys(setup.agent).sort()).toEqual(["codex", "enabled", "on", "signedIn"]);
 
       const window = await controlRequest<{ uri: string; expiresAt: number }>(info, "POST", "/pair");
       expect(parsePairUri(window.uri)?.companion).toBe(companion.id);

@@ -26,13 +26,21 @@ pub struct AssetRegistry {
 pub struct GuestEnvironment<'a> {
     pub host: &'a str,
     pub host_abi: u32,
+    /// Core ticks per virtual second: the admitted package's rate.
     pub tick_hz: u32,
+    /// Guest frames per second: the host cadence. Guests publish it as
+    /// `globalThis.__simHz`; each frame advances `tick_hz / sim_hz` ticks.
+    pub sim_hz: u32,
     pub viewport: [u32; 2],
     pub auxiliary_viewport: Option<[u32; 2]>,
     pub auxiliary_root: i32,
     pub raster_density: u32,
     pub heap_limit: usize,
     pub pak: &'a [u8],
+    /// The package's NUL-terminated worker bundle (section 8); empty when
+    /// its plan declares no worker domain. A guest that hosts the worker
+    /// starts it before the UI bundle evaluates.
+    pub worker_javascript: &'a [u8],
     /// None means that JS must load assets from pak. Some(empty) means that
     /// native asset loading completed and found no texture or sprite entries.
     pub assets: Option<&'a AssetRegistry>,
@@ -61,6 +69,13 @@ pub trait Guest {
         Ok(())
     }
     fn evaluate(&mut self, code: &[u8]) -> Result<(), RuntimeError>;
+    /// Evaluate the package's bytecode section (`pocket_package::bytecode`):
+    /// the envelope and the serialized object. `UnsupportedOperation` before
+    /// anything ran when the guest has no engine ABI or the digest is another
+    /// build's; the runtime then evaluates the source.
+    fn evaluate_bytecode(&mut self, _envelope: &[u8]) -> Result<(), RuntimeError> {
+        Err(RuntimeError::UnsupportedOperation)
+    }
     /// Run frame once and drain the engine's queued jobs before returning.
     fn frame(&mut self, frame: &GuestFrame<'_>) -> Result<(), RuntimeError>;
     fn collect(&mut self) -> Result<(), RuntimeError> {

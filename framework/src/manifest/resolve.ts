@@ -1,9 +1,12 @@
+import { WORKER_LIMITS, workerCapabilities, type WorkerResourceKind } from "../../../contracts/spec/worker.ts";
 import { isHostExtension, type HostExtension } from "./host-extension.ts";
-import { hashPocketProfile, profileHashProjection } from "../profile.ts";
+import { hashPocketProfile } from "../profile.ts";
+import { compiledProfile } from "../../../contracts/spec/profile.ts";
+import { profileDocument } from "../../../hosts/contract.ts";
 import { DYNAMIC_FORMS, PACKAGE_ROLES, TARGET_FORMS } from "../../../contracts/spec/platforms.ts";
-import { deriveAnimationClass } from "../../../contracts/spec/animation.ts";
 import { deriveModality, modalityMisses } from "../../../contracts/spec/modality.ts";
 import type {
+  FixedViewportSpec,
   ManifestViewport,
   PocketManifestV2,
   PresentationSpec,
@@ -24,7 +27,10 @@ import {
 import { validatePocketManifest, type ContractDiagnostic } from "./validate.ts";
 import { POCKET_BINDING_GENERATION } from "../../../contracts/spec/binding-generation.ts";
 import { appletManifestDiagnostics } from "../../../contracts/spec/applet.ts";
+import { cadenceFor } from "../../../contracts/spec/admission.ts";
 
+/** The package rate when the manifest states none (`app.tickHz`). */
+export const DEFAULT_TICK_HZ = 60;
 const AUXILIARY_DISPLAY = "display.auxiliary";
 const AUXILIARY_TOUCH = "input.touch.auxiliary";
 
@@ -157,7 +163,7 @@ function resolveAdaptiveDisplay(
 /** The app's viewport intent, normalized: the bare `{logical, presentation}`
  *  spelling is shorthand for `{fixed: ...}`. */
 function normalizeViewport(viewport: PocketManifestV2["app"]["viewport"]): {
-  fixed?: { logical: Viewport; presentation: PresentationMode };
+  fixed?: FixedViewportSpec;
   dynamic?: { default: Viewport; min?: Viewport; max?: Viewport };
 } {
   if ("logical" in viewport) {
@@ -168,6 +174,22 @@ function normalizeViewport(viewport: PocketManifestV2["app"]["viewport"]): {
 
 const within = (v: Viewport, min: Viewport, max: Viewport): boolean =>
   v[0] >= min[0] && v[1] >= min[1] && v[0] <= max[0] && v[1] <= max[1];
+
+/** The sizes a fixed declaration offers a target, in preference order: one
+ *  size, the listed sizes, or the target's own sizes inside the range. */
+function fixedCandidates(logical: FixedViewportSpec["logical"], targetSizes: readonly Viewport[]): Viewport[] {
+  if ("min" in logical) return targetSizes.filter(size => within(size, logical.min, logical.max));
+  return isViewport(logical) ? [logical] : [...logical];
+}
+
+function isViewport(value: FixedViewportSpec["logical"]): value is Viewport {
+  return Array.isArray(value) && typeof value[0] === "number";
+}
+
+function describeFixed(logical: FixedViewportSpec["logical"]): string {
+  if ("min" in logical) return `${logical.min[0]}x${logical.min[1]} through ${logical.max[0]}x${logical.max[1]}`;
+  return (isViewport(logical) ? [logical] : logical).map(size => `${size[0]}x${size[1]}`).join(", ");
+}
 
 /**
  * Pick and validate the viewport variant the target's FORM calls for.
@@ -224,12 +246,13 @@ function resolveViewport(
         });
         return null;
       }
-      const size = viewport.fixed.logical;
-      if (!within(size, range.min, range.max)) {
+      const declaredFixed = viewport.fixed.logical;
+      const size = fixedCandidates(declaredFixed, logicalViewports).find(candidate => within(candidate, range.min, range.max));
+      if (!size) {
         diagnostics.push({
           code: "viewport.logicalUnsupported",
           path: `${viewportPath}/fixed/logical`,
-          message: `target admits ${range.min[0]}x${range.min[1]} through ${range.max[0]}x${range.max[1]}, not ${size[0]}x${size[1]}`,
+          message: `target admits ${range.min[0]}x${range.min[1]} through ${range.max[0]}x${range.max[1]}, not ${describeFixed(declaredFixed)}`,
         });
         return null;
       }
@@ -257,16 +280,24 @@ function resolveViewport(
     });
     return null;
   }
-  const { logical, presentation } = viewport.fixed;
+  const { presentation } = viewport.fixed;
+  const declaredFixed = viewport.fixed.logical;
   const fixedPath = "logical" in declared ? viewportPath : `${viewportPath}/fixed`;
   let ok = true;
-  if (!logicalViewports.some((supported) => sameViewport(supported, logical))) {
+  const candidates = fixedCandidates(declaredFixed, logicalViewports);
+  let logical = candidates.find(candidate => logicalViewports.some(supported => sameViewport(supported, candidate)));
+  if (!logical) {
     diagnostics.push({
       code: "viewport.logicalUnsupported",
       path: `${fixedPath}/logical`,
-      message: `target does not support logical viewport ${logical[0]}x${logical[1]}`,
+      message: isViewport(declaredFixed)
+        ? `target does not support logical viewport ${declaredFixed[0]}x${declaredFixed[1]}`
+        : `target supports none of the logical viewports ${describeFixed(declaredFixed)}`,
     });
     ok = false;
+    // The remaining checks report against the first declared size.
+    logical = candidates[0];
+    if (!logical) return null;
   }
   if (!presentations.includes(presentation)) {
     diagnostics.push({
@@ -336,9 +367,9 @@ export function validatePlatformContractRegistry(
       diagnostics.push({ code: "registry.bindingGeneration", path: `/targets/${targetId}/hostAbi`,
         message: `target must use binding generation ${POCKET_BINDING_GENERATION}` });
     }
-    if (target.tickHz !== undefined && (!Number.isInteger(target.tickHz) || target.tickHz < 1 || target.tickHz > 240)) {
-      diagnostics.push({ code: "registry.invalidTickHz", path: `/targets/${targetId}/tickHz`,
-        message: "target tickHz must be an integer from 1 through 240" });
+    if (!target.cadences.length || target.cadences.some(cadence => !Number.isInteger(cadence) || cadence < 1 || cadence > 240)) {
+      diagnostics.push({ code: "registry.invalidCadences", path: `/targets/${targetId}/cadences`,
+        message: "target cadences must be integers from 1 through 240" });
     }
     if (
       !Number.isInteger(target.display.rasterDensity) ||
@@ -480,14 +511,6 @@ export function resolveBuildPlan(
   }
 
   const executionClass = request.executionClass ?? "guest";
-  const executionClasses = manifest.execution?.classes;
-  if (executionClasses && !executionClasses.includes(executionClass)) {
-    diagnostics.push({
-      code: `execution.${executionClass}Excluded`,
-      path: "/execution/classes",
-      message: `manifest declares no ${executionClass} execution class`,
-    });
-  }
   if (executionClass === "aot" && manifest.app.aot !== true) {
     diagnostics.push({ code: "execution.aotDisabled", path: "/app/aot", message: "AOT compilation requires app.aot to be true" });
   }
@@ -604,9 +627,26 @@ export function resolveBuildPlan(
     });
   }
 
+  // A worker declaration requires the second runtime and each node kind's
+  // capability; the manifest does not list them again.
+  const worker = manifest.domains?.worker;
+  const workerRequires = worker ? workerCapabilities(worker) : [];
+  for (const capability of workerRequires) {
+    if (!provided.has(capability)) {
+      diagnostics.push({
+        code: "capability.unavailable",
+        path: "/domains/worker",
+        message: `target ${request.target} does not provide ${capability}, which the worker declaration requires`,
+      });
+      continue;
+    }
+    featureAvailability.set(capability, true);
+  }
+
   const requires = new Set([
     ...manifest.engine.capabilities.requires,
     ...(chosen?.capabilities?.requires ?? []),
+    ...workerRequires,
   ]);
   const enhances = new Set(
     [...(manifest.engine.capabilities.enhances ?? []), ...(chosen?.capabilities?.enhances ?? [])].filter(
@@ -704,6 +744,46 @@ export function resolveBuildPlan(
   // on every target, before a plan exists.
   diagnostics.push(...appletManifestDiagnostics(manifest));
 
+  if (requires.has("runtime.worker") && !worker) diagnostics.push({ code: "worker.entry", path: "/domains/worker", message: "runtime.worker requires a worker entry" });
+  if (worker) {
+    if (manifest.app.aot) diagnostics.push({ code: "worker.execution", path: "/domains/worker", message: "Worker entries require the guest execution class" });
+    for (const field of ["nodes", "channels"] as const) {
+      const names = new Set<string>();
+      for (const [index, value] of (worker[field] ?? []).entries()) {
+        if (names.has(value.name)) diagnostics.push({ code: "worker.duplicate", path: `/domains/worker/${field}/${index}/name`, message: `Duplicate worker ${field} name: ${value.name}` });
+        names.add(value.name);
+      }
+    }
+    // Counts are host facts: the profile's worker table bounds each node
+    // kind, and the worker protocol bounds resources and channels.
+    const table = profile.source?.worker?.nodes;
+    const counts = new Map<WorkerResourceKind, number>();
+    for (const node of worker.nodes) counts.set(node.kind, (counts.get(node.kind) ?? 0) + 1);
+    for (const [kind, count] of table ? counts : []) {
+      const limit = table![kind] ?? 0;
+      if (count > limit) {
+        diagnostics.push({ code: "worker.nodeLimit", path: "/domains/worker/nodes", message: `target ${request.target} hosts at most ${limit} ${kind} worker node${limit === 1 ? "" : "s"}; the manifest declares ${count}` });
+      }
+    }
+    if (worker.nodes.length > WORKER_LIMITS.resources) {
+      diagnostics.push({ code: "worker.nodeLimit", path: "/domains/worker/nodes", message: `a worker owns at most ${WORKER_LIMITS.resources} nodes; the manifest declares ${worker.nodes.length}` });
+    }
+    if ((worker.channels ?? []).length > WORKER_LIMITS.channels) {
+      diagnostics.push({ code: "worker.channelLimit", path: "/domains/worker/channels", message: `a worker has at most ${WORKER_LIMITS.channels} channels; the manifest declares ${worker.channels!.length}` });
+    }
+  }
+
+  // The package rate is the application's; the target must present it at a
+  // cadence the rate is a whole multiple of.
+  const tickHz = manifest.app.tickHz ?? DEFAULT_TICK_HZ;
+  if (cadenceFor(tickHz, profile.cadences) === null) {
+    diagnostics.push({
+      code: "app.tickHz",
+      path: "/app/tickHz",
+      message: `app.tickHz ${tickHz} is not a whole multiple of a ${request.target} cadence (${profile.cadences.join(", ")} Hz)`,
+    });
+  }
+
   if (diagnostics.length > 0 || !resolvedViewport) return { ok: false, diagnostics };
 
   const logical: Viewport = [resolvedViewport.logical[0], resolvedViewport.logical[1]];
@@ -714,12 +794,11 @@ export function resolveBuildPlan(
     [...featureAvailability.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
   );
 
-  // The old registry's absent rate has always meant 60 Hz. This one-way
-  // adapter preserves that contract while every emitted plan names its rate.
-  const softwareProfile = profileHashProjection({ id: request.target, ...profile, tickHz: profile.tickHz ?? 60 });
+  // The plan records the profile with the rate the package is compiled at.
+  const document = profileDocument(request.target, profile);
   const content: ResolvedBuildPlanContent = {
-    profile: softwareProfile,
-    profileHash: hashPocketProfile(softwareProfile),
+    profile: { ...compiledProfile(document), tickHz },
+    profileHash: hashPocketProfile(document),
     app: {
       id: manifest.id,
       title: manifest.title,
@@ -732,6 +811,7 @@ export function resolveBuildPlan(
       ...(manifest.app.model !== undefined ? { model: manifest.app.model } : {}),
       ...(manifest.app.recursionLimit !== undefined ? { recursionLimit: manifest.app.recursionLimit } : {}),
     },
+    ...(worker ? { domains: { worker } } : {}),
     presentation,
     target: {
       id: request.target,
@@ -746,7 +826,7 @@ export function resolveBuildPlan(
     },
     ...(resolvedAuxiliary ? { surfaces: { auxiliary: resolvedAuxiliary } } : {}),
     modality,
-    animation: deriveAnimationClass(profile),
+    animation: profile.display.animation,
     features,
     companions: manifest.app.companions ?? [],
     ...(request.hostExtension ? { hostExtension: request.hostExtension } : {}),

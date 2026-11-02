@@ -15,6 +15,8 @@ pub use alloc::borrow::Cow;
 pub use config::{Profile, RuntimeConfig};
 pub use guest::*;
 pub use pocket_drivers::InputClasses;
+pub use pocket_package;
+pub use pocket_package::Timing;
 pub use pocket_present::{DisplayId, RendererId};
 
 use alloc::{boxed::Box, rc::Rc, vec::Vec};
@@ -123,6 +125,21 @@ enum PackageAssets {
     Admitted(Rc<LoadedPackage>),
     Embedded(Rc<[u8]>),
 }
+/// The admitted package's pak as the storage its font atlases read in place
+/// (`pocketjs_core::text::Coverage`); the package lives while they do.
+struct AdmittedPak(Rc<LoadedPackage>);
+impl AsRef<[u8]> for AdmittedPak {
+    fn as_ref(&self) -> &[u8] {
+        self.0.pak()
+    }
+}
+/// An embedded pack as that storage.
+struct EmbeddedPak(Rc<[u8]>);
+impl AsRef<[u8]> for EmbeddedPak {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
 impl PackageAssets {
     fn pak(&self) -> &[u8] {
         match self {
@@ -160,9 +177,14 @@ impl OpContext {
             return Err(RuntimeError::InvalidState);
         }
         let mut state = self.core_mut()?;
-        let registry = assets::install(&mut state.ui, pak)?;
+        let shared: Rc<[u8]> = Rc::from(pak);
+        let registry = assets::install(
+            &mut state.ui,
+            &shared,
+            Some(Rc::new(EmbeddedPak(shared.clone()))),
+        )?;
         state.mutated();
-        *self.package.borrow_mut() = Some(PackageAssets::Embedded(Rc::from(pak)));
+        *self.package.borrow_mut() = Some(PackageAssets::Embedded(shared));
         Ok(registry)
     }
     /// Declare that the embedding supplies the compositor raster namespace.
@@ -265,6 +287,23 @@ impl OpContext {
     }
 }
 
+/// Evaluate the admitted variant: its bytecode when the guest's engine reads
+/// it, its source otherwise. A guest without the bytecode's engine answers
+/// `UnsupportedOperation` before running anything, so the source is a whole
+/// fallback; any other error stands, as the realm may have run.
+fn evaluate_package(guest: &mut dyn Guest, package: &LoadedPackage) -> Result<(), RuntimeError> {
+    if let Some(envelope) = package.bytecode() {
+        match guest.evaluate_bytecode(envelope) {
+            Err(RuntimeError::UnsupportedOperation) if !package.javascript().is_empty() => {}
+            result => return result,
+        }
+    }
+    if package.javascript().is_empty() {
+        return Err(RuntimeError::UnsupportedOperation);
+    }
+    guest.evaluate(package.javascript())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Configuring,
@@ -288,6 +327,7 @@ pub struct Runtime {
     native_assets: bool,
     pending_frame: bool,
     embedded_viewport: bool,
+    timing: Option<Timing>,
 }
 impl Runtime {
     pub fn new(config: RuntimeConfig) -> Result<Self, RuntimeError> {
@@ -296,9 +336,7 @@ impl Runtime {
         let logical = profile.logical_viewports[0];
         let mut ui = Ui::new_with_raster_density(profile.density);
         ui.set_viewport(logical[0] as f32, logical[1] as f32);
-        if !ui.set_tick_rate(profile.tick_hz) {
-            return Err(RuntimeError::InvalidConfiguration);
-        }
+        // The core rate is the admitted package's, set at boot before any tick.
         if let Some(aux) = profile.auxiliary_logical.first() {
             ui.create_auxiliary_surface(aux[0] as f32, aux[1] as f32);
         }
@@ -327,7 +365,22 @@ impl Runtime {
             native_assets: true,
             pending_frame: false,
             embedded_viewport: false,
+            timing: None,
         })
+    }
+    /// The booted package's tick rate and the cadence it is presented at;
+    /// None before boot. Programs schedule one `tick` (or `advance` and
+    /// `present`) per cadence period.
+    pub fn timing(&self) -> Option<Timing> {
+        self.timing
+    }
+    /// Set the core rate before the first tick and record the cadence.
+    fn start_clock(&mut self, timing: Timing) -> Result<(), RuntimeError> {
+        if !self.ops.core_mut()?.ui.set_tick_rate(timing.tick_hz) {
+            return Err(RuntimeError::InvalidState);
+        }
+        self.timing = Some(timing);
+        Ok(())
     }
     pub fn op_context(&self) -> OpContext {
         self.ops.clone()
@@ -355,6 +408,12 @@ impl Runtime {
     pub fn set_native_asset_loading(&mut self, enabled: bool) -> Result<(), RuntimeError> {
         self.configuring()?;
         self.native_assets = enabled;
+        Ok(())
+    }
+    /// Decoded bytes of package textures the core keeps past a tick
+    /// (`Ui::set_texture_budget`); zero keeps every texture.
+    pub fn set_texture_budget(&mut self, bytes: usize) -> Result<(), RuntimeError> {
+        self.ops.core_mut()?.ui.set_texture_budget(bytes);
         Ok(())
     }
     /// Let an embedding program manage its presentation target dimensions.
@@ -602,22 +661,31 @@ impl Runtime {
     }
     /// Start code and assets linked into an AOT program. No package source or
     /// JavaScript payload is read. The generated artifact's profile hash must
-    /// match this instance, and its viewport must be declared by that profile.
+    /// match this instance, its viewport must be declared by that profile,
+    /// and its baked `tick_hz` must be a whole multiple of a profile cadence.
     /// Presentation is deferred until `present` or `skip_presentation`.
     pub fn boot_aot_deferred(
         &mut self,
         profile_hash: [u8; 32],
         viewport: [u32; 2],
         physics: bool,
+        tick_hz: u32,
     ) -> Result<(), RuntimeError> {
         self.validate_boot_drivers()?;
+        let cadence_hz = pocket_package::admission::cadence_for(tick_hz, &self.profile.cadences);
         if profile_hash != self.config.profile_hash
             || !self.profile.admits_viewport(viewport)
             || self.source.is_some()
+            || cadence_hz.is_none()
         {
             return Err(RuntimeError::ProfileMismatch);
         }
+        let timing = Timing {
+            tick_hz,
+            cadence_hz: cadence_hz.unwrap(),
+        };
         let (scale, auxiliary_viewport) = self.presentation_layout(viewport, None)?;
+        self.start_clock(timing)?;
         self.presenter.set_scale(scale)?;
         let auxiliary_root = {
             let mut state = self.ops.core_mut()?;
@@ -635,13 +703,15 @@ impl Runtime {
         let environment = GuestEnvironment {
             host: &self.profile.id,
             host_abi: self.config.host_abi,
-            tick_hz: self.profile.tick_hz,
+            tick_hz: timing.tick_hz,
+            sim_hz: timing.cadence_hz,
             viewport,
             auxiliary_viewport,
             auxiliary_root,
             raster_density: self.profile.density,
             heap_limit: self.config.heap_limit,
             pak: &[],
+            worker_javascript: &[],
             assets: None,
         };
         let guest = self.guest.as_mut().unwrap();
@@ -666,35 +736,32 @@ impl Runtime {
     pub fn boot_deferred(&mut self) -> Result<(), RuntimeError> {
         self.validate_boot_drivers()?;
         let source = self.source.as_mut().ok_or(RuntimeError::MissingPackage)?;
+        let host = self
+            .profile
+            .host_facts(self.config.host_abi, self.config.profile_hash);
         let package = Rc::new(
-            LoadedPackage::load(
-                source.as_mut(),
-                &self.profile.id,
-                self.config.host_abi,
-                &self.config.profile_hash,
-                self.config.heap_limit,
-            )
-            .map_err(RuntimeError::Package)?,
+            LoadedPackage::load(source.as_mut(), &host, self.config.heap_limit)
+                .map_err(RuntimeError::Package)?,
         );
+        // Admission read the same plan; these facts are present.
         let facts = pocket_package::plan_facts(package.plan())
             .map_err(|_| RuntimeError::ProfileMismatch)?;
         let viewport = [facts.viewport.width, facts.viewport.height];
-        if facts.viewport.raster_density != self.profile.density
-            || facts
-                .auxiliary
-                .is_some_and(|aux| aux.raster_density != self.profile.density)
-        {
-            return Err(RuntimeError::ProfileMismatch);
-        }
         // A registered auxiliary display keeps its profile surface available
         // even when this package does not declare auxiliary content.
         let (scale, auxiliary_viewport) =
             self.presentation_layout(viewport, facts.auxiliary.map(|aux| [aux.width, aux.height]))?;
         self.presenter.set_scale(scale)?;
+        let timing = package.timing;
+        self.start_clock(timing)?;
         let (registry, auxiliary_root) = {
             let mut state = self.ops.core_mut()?;
             let registry = if self.native_assets {
-                Some(assets::install(&mut state.ui, package.pak())?)
+                Some(assets::install(
+                    &mut state.ui,
+                    package.pak(),
+                    Some(Rc::new(AdmittedPak(package.clone()))),
+                )?)
             } else {
                 None
             };
@@ -722,20 +789,22 @@ impl Runtime {
         let env = GuestEnvironment {
             host: &self.profile.id,
             host_abi: self.config.host_abi,
-            tick_hz: self.profile.tick_hz,
+            tick_hz: timing.tick_hz,
+            sim_hz: timing.cadence_hz,
             viewport,
             auxiliary_viewport,
             auxiliary_root,
             raster_density: self.profile.density,
             heap_limit: self.config.heap_limit,
             pak: package.pak(),
+            worker_javascript: package.worker_javascript(),
             assets: registry.as_ref(),
         };
         let guest = self.guest.as_mut().unwrap();
         self.guest_initialized = true;
         let started = guest
             .initialize(self.ops.clone(), &env)
-            .and_then(|()| guest.evaluate(package.javascript()));
+            .and_then(|()| evaluate_package(guest.as_mut(), &package));
         if let Err(error) = started {
             self.state = State::Failed;
             guest.shutdown();
@@ -822,16 +891,19 @@ impl Runtime {
         presented?;
         Ok(())
     }
-    /// Sample input and advance the guest and core once. No rendering work is
-    /// submitted; a Deferred frame from the last present may still be in
-    /// flight. A subsequent advance is rejected until `present` runs,
-    /// allowing the program to insert native scene commands between the two.
+    /// Sample input, run one guest frame, and advance the core by the booted
+    /// package's ticks per presented frame (`Timing::core_ticks`: tick rate
+    /// divided by cadence). No rendering work is submitted; a Deferred frame
+    /// from the last present may still be in flight. A subsequent advance is
+    /// rejected until `present` runs, allowing the program to insert native
+    /// scene commands between the two.
     pub fn advance(&mut self) -> Result<(), RuntimeError> {
-        self.advance_with_core_ticks(1)
+        let ticks = self.timing.map_or(1, |timing| timing.core_ticks());
+        self.advance_with_core_ticks(ticks)
     }
     /// Run one guest frame followed by a bounded number of fixed core steps.
-    /// Embeddings with a lower guest cadence retain the core simulation step;
-    /// ordinary runtime ticks always use one. No presentation occurs here.
+    /// Embeddings that pick their own guest cadence pass the step count;
+    /// `advance` passes the booted package's. No presentation occurs here.
     pub fn advance_with_core_ticks(&mut self, ticks: u32) -> Result<(), RuntimeError> {
         if !(1..=60).contains(&ticks) {
             return Err(RuntimeError::InvalidArgument);

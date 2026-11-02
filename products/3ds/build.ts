@@ -1,3 +1,4 @@
+import { readPocketManifest } from "../../framework/src/manifest/load.ts";
 import { capture, prepareNative3ds, runNative3dsMake } from "../../tools/build/3ds/native.ts";
 // tools/3ds.ts <app> [cargo args…] — build the app JS+pak (tools/build.ts), the
 // Rust core staticlib, QuickJS, and the .3dsx for the out-of-registry "3ds-dev"
@@ -74,9 +75,9 @@ import { capture, prepareNative3ds, runNative3dsMake } from "../../tools/build/3
 
 import { $ } from "bun";
 import { ensureThreeDsProfileHeader } from "../../tools/3ds-contracts.ts";
-import softwareProfile from "../../profiles/3ds-dev.ts";
+import { POCKET_PROFILES } from "../../hosts/index.ts";
 import type { PocketProfile } from "../../framework/src/profile.ts";
-import type { RuntimeBuildContext } from "../../framework/src/runtime-config.ts";
+import type { RuntimeBuildContext } from "../../framework/src/host-config.ts";
 import { threeDsProfileHeader } from "../../tools/3ds-contracts.ts";
 import { canonicalProfileJson, hashPocketProfile } from "../../framework/src/profile.ts";
 import { containerPathFor, ensureQuickJs, runContainer, THREE_DS_CONTAINER_IMAGE, type Mount } from "../../tools/3ds-toolchain.ts";
@@ -106,6 +107,7 @@ import {
   resolve3dsBuildPlan,
 } from "../../tools/3ds-profile.ts";
 import { makeVariant } from "../../tools/pocket-pack.ts";
+const softwareProfile = POCKET_PROFILES["3ds-dev"];
 
 const repository = new URL("../..", import.meta.url).pathname; // PocketJS/
 const hostDirectory = `${repository}products/3ds/`;
@@ -132,7 +134,7 @@ export const MAKEROM_REVISION = "e8f5f529c54ff9b22a2491a480ffa69206bf7b19";
 // ---------------------------------------------------------------------------
 
 export interface ThreeDsArguments {
-  /** Bare app name (apps/<app>/pocket.json); empty when --plan is given. */
+  /** Bare app name (apps/<app>/pocket.app.json); empty when --plan is given. */
   readonly app: string;
   readonly planPath?: string;
   readonly manifestPath?: string;
@@ -145,6 +147,10 @@ export interface ThreeDsArguments {
   /** Build the target-thinned guest package without rebuilding the native runtime. */
   readonly pocketOnly: boolean;
   readonly capture: boolean;
+  /** A product extension's directory (extension.mk), for a plan declaring system.extension. */
+  readonly extensionDir?: string;
+  /** The directory staged as romfs:/extension. */
+  readonly extensionRomfs?: string;
   /** Also package the ELF as an installable CIA title. */
   readonly cia: boolean;
   /** Forwarded to tools/build.ts. */
@@ -172,6 +178,8 @@ export function parse3dsArguments(
   let pocketOnly = false;
   let capture = false;
   let cia = false;
+  let extensionDir: string | undefined;
+  let extensionRomfs: string | undefined;
   const cargoArgs: string[] = [];
 
   for (const a of argv) {
@@ -184,8 +192,10 @@ export function parse3dsArguments(
     else if (a.startsWith("--project-root=")) projectRoot = resolvePath(a.slice("--project-root=".length));
     else if (a.startsWith("--outdir=")) outputDir = resolvePath(a.slice("--outdir=".length)) + "/";
     else if (a.startsWith("--package-outdir=")) packageDir = resolvePath(a.slice("--package-outdir=".length));
+    else if (a.startsWith("--extension=")) extensionDir = resolvePath(a.slice("--extension=".length));
+    else if (a.startsWith("--extension-romfs=")) extensionRomfs = resolvePath(a.slice("--extension-romfs=".length));
     else if (a === "--config" || a.startsWith("--config=") || a === "--no-config") {
-      throw new Error("PocketJS 3ds: application configuration belongs in pocket.json");
+      throw new Error("PocketJS 3ds: application configuration belongs in pocket.app.json");
     } else if (!planPath && !app && !a.startsWith("-")) app = a;
     else cargoArgs.push(a);
   }
@@ -200,6 +210,8 @@ export function parse3dsArguments(
     skipBuild,
     pocketOnly,
     capture,
+    extensionDir,
+    extensionRomfs,
     cia,
     cargoArgs,
   };
@@ -207,7 +219,7 @@ export function parse3dsArguments(
 
 const USAGE =
   "usage: bun tools/3ds.ts <app> [--plan=<resolved-plan.json>] [--project-root=<dir>] " +
-  "[--outdir=<dir>] [--package-outdir=<dir>] [--skip-build] [--pocket-only] [--capture] [--cia] [cargo args…]   " +
+  "[--outdir=<dir>] [--package-outdir=<dir>] [--extension=<dir>] [--extension-romfs=<dir>] [--skip-build] [--pocket-only] [--capture] [--cia] [cargo args…]   " +
   "e.g. bun tools/3ds.ts 3ds-demo --cia";
 
 export interface CaptureDefines {
@@ -458,7 +470,7 @@ async function loadBuildPlan(
     let manifestPath = args.manifestPath ?? "";
     const boundary = resolvePath(args.projectRoot);
     while (!manifestPath) {
-      const candidate = join(directory, "pocket.json");
+      const candidate = join(directory, "pocket.app.json");
       if (existsSync(candidate)) {
         manifestPath = candidate;
         break;
@@ -468,11 +480,11 @@ async function loadBuildPlan(
     }
     if (!manifestPath) {
       throw new Error(
-        `PocketJS 3ds: ${args.planPath} needs its source pocket.json between ${dirname(entry)} and ${boundary}; ` +
+        `PocketJS 3ds: ${args.planPath} needs its source pocket.app.json between ${dirname(entry)} and ${boundary}; ` +
           "the runtime package carries the admitted manifest verbatim",
       );
     }
-    const manifestPlan = resolve3dsBuildPlan(JSON.parse(readFileSync(manifestPath, "utf8")));
+    const manifestPlan = resolve3dsBuildPlan(readPocketManifest(manifestPath).manifest);
     if (canonicalJson(manifestPlan) !== canonicalJson(checked)) {
       throw new Error(
         `PocketJS 3ds: ${args.planPath} has drifted from ${manifestPath}; regenerate the resolved plan before packaging`,
@@ -483,8 +495,8 @@ async function loadBuildPlan(
   // An app outside this repository is named relative to --project-root.
   const candidates = [
     ...new Set([
-      join(args.projectRoot, "apps", args.app, "pocket.json"),
-      `${repository}apps/${args.app}/pocket.json`,
+      join(args.projectRoot, "apps", args.app, "pocket.app.json"),
+      `${repository}apps/${args.app}/pocket.app.json`,
     ]),
   ];
   const manifest = candidates.find((path) => existsSync(path));
@@ -496,7 +508,7 @@ async function loadBuildPlan(
     );
   }
   const plan = assert3dsPlan(
-    resolve3dsBuildPlan(JSON.parse(readFileSync(manifest, "utf8"))),
+    resolve3dsBuildPlan(readPocketManifest(manifest).manifest),
     manifest,
   );
   const planPath = `${repository}.pocket/3ds/${plan.app.output}.plan.json`;
@@ -580,6 +592,7 @@ export async function build3ds(argv: readonly string[], context?: RuntimeBuildCo
           title: plan.app.title,
         },
         js: new Uint8Array(readFileSync(guestJavaScript)),
+        workerJs: plan.domains?.worker ? new Uint8Array(readFileSync(join(args.outputDir, `${inputs.appOutput}.worker.js`))) : undefined,
         pak: new Uint8Array(readFileSync(guestPack)),
       }),
     ],
@@ -597,7 +610,7 @@ export async function build3ds(argv: readonly string[], context?: RuntimeBuildCo
   const { imageId, coreLibrary, quickJsDirectory, mounts } = await prepare3dsNative({
     context,
     cargoArgs: args.cargoArgs,
-    roots: [args.outputDir, args.packageDir, args.projectRoot],
+    roots: [args.outputDir, args.packageDir, args.projectRoot, ...(args.extensionDir ? [args.extensionDir] : []), ...(args.extensionRomfs ? [args.extensionRomfs] : [])],
   });
 
   // 4. everything else that needs devkitARM
@@ -613,6 +626,10 @@ export async function build3ds(argv: readonly string[], context?: RuntimeBuildCo
     ? await ensureMakerom(join(distributionRoot, "makerom"), imageId, mounts)
     : "";
 
+  const extension = plan.features["system.extension"] ? args.extensionDir : undefined;
+  if (plan.features["system.extension"] && !extension) {
+    throw new Error("PocketJS 3ds: the plan declares system.extension; pass --extension=<dir>");
+  }
   const output = join(args.packageDir, `${inputs.appOutput}.3dsx`);
   const ciaOutput = join(args.packageDir, `${inputs.appOutput}.cia`);
   const makeEnvironment: Record<string, string> = {
@@ -629,6 +646,8 @@ export async function build3ds(argv: readonly string[], context?: RuntimeBuildCo
     POCKETJS_OFFLOAD: plan.features["io.offload"] ? "1" : "",
     POCKETJS_MEDIA: plan.features["media.playback"] ? "1" : "",
     POCKETJS_LOCALMEDIA: plan.features["media.local"] ? "1" : "",
+    POCKETJS_EXTENSION: extension ? containerPathFor(extension, mounts) : "",
+    POCKETJS_EXTENSION_ROMFS: extension && args.extensionRomfs ? containerPathFor(args.extensionRomfs, mounts) : "",
     POCKETJS_OFFLOAD_SLOT: createHash("sha256").update(plan.app.id).digest("hex").slice(0, 16),
     POCKETJS_SMDH_TITLE: plan.app.title,
     POCKETJS_SMDH_AUTHOR: plan.app.id,

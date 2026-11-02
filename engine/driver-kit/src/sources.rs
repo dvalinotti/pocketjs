@@ -1,7 +1,7 @@
 //! Source checks use the actual implementation supplied by its CI.
 use alloc::vec;
 use pocket_drivers::*;
-use pocket_package::{select_guest, source::LoadedPackage};
+use pocket_package::{select_guest, source::LoadedPackage, HostFacts};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SourceViolation {
@@ -12,6 +12,7 @@ pub enum SourceViolation {
     RangeBytes,
     EndOfFile,
     OutOfBounds,
+    Transfer,
     Admission,
     InputOverwrite,
     InputClasses,
@@ -66,19 +67,31 @@ pub fn check_package_source(
     Ok(())
 }
 
+/// A source that transfers storage hands over the bytes its reads returned.
+/// This consumes a source whose transfer moves ownership, so it runs after
+/// every other check on that source.
+pub fn check_package_transfer(
+    source: &mut dyn PackageSource,
+    expected: &[u8],
+) -> Result<(), SourceViolation> {
+    match source.take_bytes() {
+        Ok(bytes) if bytes.as_ref() == expected => Ok(()),
+        Err(SourceError::Unsupported) => Ok(()),
+        _ => Err(SourceViolation::Transfer),
+    }
+}
+
 /// Run a corpus item through the driver's source and compare admission with
 /// the canonical parser. `expected` is the trusted corpus item, never bytes
 /// recovered through this source. Both accepted and rejected fixtures count.
-pub fn check_package_admission(
+pub fn check_package_admission<S: AsRef<str>>(
     source: &mut dyn PackageSource,
     expected: &[u8],
-    target: &str,
-    generation: u32,
-    profile_hash: &[u8; 32],
+    host: &HostFacts<'_, S>,
 ) -> Result<(), SourceViolation> {
     check_package_source(source, expected)?;
-    let canonical = select_guest(expected, target, generation, profile_hash, false);
-    let loaded = LoadedPackage::load(source, target, generation, profile_hash, expected.len());
+    let canonical = select_guest(expected, host, false);
+    let loaded = LoadedPackage::load(source, host, expected.len());
     match (canonical, loaded) {
         (Ok(guest), Ok(loaded))
             if guest.js == loaded.javascript()

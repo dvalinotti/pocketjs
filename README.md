@@ -23,9 +23,13 @@ application, and a Rust core performs flexbox layout and draws every pixel **in
 one thread inside one process**. There is **no DOM, no CSS engine and no
 WebView**. PocketJS is a [Pocket Nexus](https://pocket.nexus) project.
 
-<a href="https://pocketjs.pocket.nexus">
-  <img src="./site/assets/pocketjs-demo-wall.jpg" alt="A wall of PocketJS software: music, deep-zoom graphics, messaging, a digital character, galleries, DevTools, dashboards, media, and a café app, alongside OpenStrike, Pocket Voxel and Pocket Figma on PSP, including Motion Lab studies credited to yui540" />
+<a href="https://studio.pocket.nexus">
+  <img src="./assets/screenshots/pocket-studio-wall.jpg" alt="Twelve screens from Pocket Studio. Applets: Tokyo Weather, GitHub, Pocket Home, Hacker News, Discord, X and YouTube. Games: Pocket Duty, Pocket Tokyo, Pocket Requiem, Pocket Atlas and Pocket Maneuver." />
 </a>
+
+Applets built with PocketJS and games built with Pocket3D, from
+[Pocket Studio](https://studio.pocket.nexus). Its agent makes a Pocket Applet
+from a request: Tokyo Weather, top left, came from one sentence.
 
 ## In this repository
 
@@ -108,9 +112,9 @@ fixed Tailwind subset, enumerated in
 ### One bundle, many screens
 
 One bundle serves machines of different densities. An application declares its
-viewport and required APIs in `pocket.json`, and a target profile must satisfy
-that declaration before compilation and packaging proceed. Run from the
-application directory:
+viewport and required APIs in its app contract, `pocket.app.json`, and a host
+contract must satisfy that declaration before compilation and packaging
+proceed. Run from the application directory:
 
 ```sh
 pocket create my-app
@@ -277,8 +281,8 @@ See also: [Architecture](https://pocketjs.pocket.nexus/docs/architecture/) ·
 
 PocketJS has booted on every operating system below, on the real machine. What
 changes between them is one native host, never the application, and each row
-links to the post or pull request that brought it up. Device programs, profiles
-and build tools are maintained in this repository; see
+links to the post or pull request that brought it up. Device programs, host
+contracts and build tools are maintained in this repository; see
 [Device native builds](./docs/DEVICE_BUILDS.md).
 
 | Operating system | Native host | Receipt |
@@ -415,11 +419,12 @@ repository or the Rust AOT build.
 | [`devices/`](./devices/) | Pocket3D device kernels for GXM, GE and PICA200 |
 | [`pocket3d/`](./pocket3d/) | The Pocket3D entry point: its design and a map of where its code lives |
 | [`microts/`](./microts/) | The MicroTS ahead-of-time compiler |
-| [`contracts/`](./contracts/) | Generated wire specs, capability registry, manifests, build plans and package formats |
+| [`contracts/`](./contracts/) | Generated wire specs, capability registry, app and host contract schemas, build plans and package formats |
 | [`programs/`](./programs/) | Runtime composition, entry points and native build recipes |
-| [`profiles/`](./profiles/) | Software contracts identified by content hashes |
+| [`hosts/`](./hosts/) | Built-in host contracts (`hosts/<id>/pocket.host.json`) identified by content hashes |
 | [`platforms/`](./platforms/) | Operating-system, SDK and fixed-console drivers |
 | [`platforms/esp-idf/`](./platforms/esp-idf/) | Runtime, QuickJS, display, PPA, input and runner components |
+| [`platforms/sifli/`](./platforms/sifli/) | SiFli SF32LB5x hooks, EPIC/VG Lite executor and renderer, display, input, guest and runner |
 | [`apps/`](./apps/) | Framework demos and system applications used by the launcher and acceptance suites |
 | [`tools/`](./tools/) | Build, package, launcher, device, DevTools, benchmark and release commands |
 | [`tests/`](./tests/) | Contract, compiler, simulation, emulator, package and golden verification |
