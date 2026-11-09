@@ -45,14 +45,22 @@
 
 #![no_std]
 
+extern crate alloc;
+
 use pocket_drivers::DamageRect;
 use pocket_drivers::RenderResources;
 use pocket_drivers::TexView;
 use pocket_spec::{self as spec, draw_op};
 
+pub mod abi;
+pub mod compositor;
+pub mod incremental;
 mod surface;
 #[cfg(test)]
 mod triangle_tests;
+pub use incremental::{
+    render_scaled_argb_incremental, render_scaled_incremental, render_scaled_rgb565_incremental,
+};
 pub use surface::{
     render_operation, render_surface, render_surface_regions, OperationResources, RasterRenderer,
 };
@@ -83,15 +91,14 @@ impl Clip {
 
 #[inline]
 fn xy(word: u32, scale: i32) -> (i32, i32) {
-    (
-        (word & 0xffff) as u16 as i16 as i32 * scale,
-        (word >> 16) as u16 as i16 as i32 * scale,
-    )
+    let (x, y) = pocket_render::xy(word);
+    (x * scale, y * scale)
 }
 
 #[inline]
 fn wh(word: u32, scale: i32) -> (i32, i32) {
-    ((word & 0xffff) as i32 * scale, (word >> 16) as i32 * scale)
+    let (width, height) = pocket_render::wh(word);
+    (width * scale, height * scale)
 }
 
 #[inline]
@@ -466,9 +473,9 @@ pub fn render_scaled_rgb565(
 }
 
 /// Execute DrawList words over an existing RGBA8 framebuffer without
-/// clearing it. Render backends composite these into their own scene (the
-/// gpui tri-batch fallback keeps uncovered pixels transparent this way —
-/// the clearing variants paint the full-frame opaque-black background).
+/// clearing it. Render backends composite these into their own scene.
+/// Uncovered pixels retain their original alpha; the clearing variants
+/// paint the full-frame opaque-black background.
 pub fn render_scaled_over(
     ui: &(impl RenderResources + ?Sized),
     words: &[u32],

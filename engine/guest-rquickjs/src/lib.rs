@@ -1,13 +1,13 @@
 //! A QuickJS realm whose UI calls dispatch through the runtime's generated contract.
-use pocket_runtime::generated_ops::{
-    ArgKind, OpDescriptor, ResultKind, BINDING_GENERATION, IDF_OPS, LEGACY_C_OPS, OP_DESCRIPTORS,
-};
 use pocket_drivers::{
     abi::{
         POCKET_TEXT_COMMIT, POCKET_TEXT_COMPOSITION, POCKET_TEXT_COMPOSITION_END,
         POCKET_TEXT_KEY_DOWN, POCKET_TEXT_KEY_UP,
     },
     TextEvent,
+};
+use pocket_runtime::generated_ops::{
+    ArgKind, OpDescriptor, ResultKind, BINDING_GENERATION, IDF_OPS, OP_DESCRIPTORS,
 };
 use pocket_runtime::{
     Guest, GuestEnvironment, GuestFrame, OpArg, OpContext, OpResult, RuntimeError,
@@ -19,12 +19,11 @@ use rquickjs::{
 
 /// The canonical profile has required numeric arguments, JS integer coercion,
 /// nonnegative duration clamping, lossy UTF-8, and borrowed ArrayBuffer/views.
-/// Compatibility profiles retain the older namespace and coercion policies.
+/// IDF has its own numeric and buffer coercion contract.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BindingProfile {
     #[default]
     Canonical,
-    LegacyC,
     Idf,
 }
 
@@ -33,7 +32,62 @@ pub struct RquickjsGuest {
     runtime: Option<Runtime>,
     profile: BindingProfile,
     last_error: Option<String>,
+    /// the environment's heap limit (0: none)
+    heap_limit: usize,
+    /// the collection threshold this guest set last (keep_collection_below_limit)
+    threshold_set: usize,
 }
+
+/// The collection threshold QuickJS keeps for `context`'s runtime.
+fn gc_threshold(context: &Context) -> usize {
+    context.with(|ctx| {
+        // SAFETY: `with` holds the runtime's lock, and the runtime outlives its context
+        unsafe {
+            rquickjs::qjs::JS_GetGCThreshold(rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()))
+                as usize
+        }
+    })
+}
+
+/// QuickJS collects cycles once the heap passes a threshold, which it sets to
+/// 1.5 times the heap a collection leaves and checks only when it creates an
+/// object; an allocation past the memory limit fails without collecting
+/// first. With the live heap above two thirds of the limit, 1.5 times it lies
+/// past the limit, and garbage a collection would free runs the guest out of
+/// memory; strings and buffers allocated between two objects pass the
+/// threshold unchecked. This keeps the threshold at most halfway from the
+/// heap the last collection left (QuickJS's threshold over 1.5) to the limit,
+/// which lowers it once the live heap is above half the limit.
+///
+/// `limit` is the runtime's memory limit (0: none, and nothing changes) and
+/// `set` the threshold the previous call answered; the call answers the
+/// threshold it leaves, to pass back next time. It reads one field and writes
+/// it when QuickJS has collected since. A realm calls it after every turn,
+/// outside [`Context::with`], whether the turn returned or threw.
+/// pocket-mod's realm calls it too.
+pub fn keep_collection_below_limit(
+    runtime: &Runtime,
+    context: &Context,
+    limit: usize,
+    set: usize,
+) -> usize {
+    if limit == 0 {
+        return set;
+    }
+    let threshold = gc_threshold(context);
+    if threshold == set {
+        return set;
+    }
+    // QuickJS's own: 1.5 times the heap its last collection left
+    let live = threshold / 3 * 2;
+    let halfway = live + limit.saturating_sub(live) / 2;
+    if threshold <= halfway {
+        return set;
+    }
+    runtime.set_gc_threshold(halfway);
+    halfway
+}
+
 impl Default for RquickjsGuest {
     fn default() -> Self {
         Self::new(BindingProfile::Canonical)
@@ -46,6 +100,8 @@ impl RquickjsGuest {
             runtime: None,
             profile,
             last_error: None,
+            heap_limit: 0,
+            threshold_set: 0,
         }
     }
     pub fn last_error(&self) -> Option<&str> {
@@ -53,6 +109,13 @@ impl RquickjsGuest {
     }
     pub fn with<R>(&self, f: impl for<'js> FnOnce(Ctx<'js>) -> R) -> Option<R> {
         self.context.as_ref().map(|ctx| ctx.with(f))
+    }
+    /// After a turn, whether it returned or threw: [`keep_collection_below_limit`].
+    fn keep_below_limit(&mut self) {
+        if let (Some(runtime), Some(context)) = (&self.runtime, &self.context) {
+            self.threshold_set =
+                keep_collection_below_limit(runtime, context, self.heap_limit, self.threshold_set);
+        }
     }
     fn remember<T, E: std::fmt::Display>(
         &mut self,
@@ -82,6 +145,8 @@ impl Guest for RquickjsGuest {
         if environment.heap_limit != 0 {
             runtime.set_memory_limit(environment.heap_limit);
         }
+        self.heap_limit = environment.heap_limit;
+        self.threshold_set = 0;
         let context = self.remember(Context::full(&runtime))?;
         let result = context.with(|ctx| mount_ui(&ctx, ops, environment, self.profile));
         self.remember(result)?;
@@ -98,14 +163,18 @@ impl Guest for RquickjsGuest {
             ctx.eval::<(), _>(code)
                 .map_err(|error| engine_error(&ctx, error))
         });
-        self.remember(result)?;
-        self.collect()
+        let turn = self.remember(result).and_then(|()| self.collect());
+        // a turn that threw (out of memory among them) left QuickJS's threshold too
+        self.keep_below_limit();
+        turn
     }
     fn frame(&mut self, frame: &GuestFrame<'_>) -> Result<(), RuntimeError> {
         let context = self.context.as_ref().ok_or(RuntimeError::Guest)?;
-        let result = context.with(|ctx| call_frame(&ctx, frame));
-        self.remember(result)?;
-        self.collect()
+        let result =
+            context.with(|ctx| call_frame(&ctx, frame).map_err(|error| engine_error(&ctx, error)));
+        let turn = self.remember(result).and_then(|()| self.collect());
+        self.keep_below_limit();
+        turn
     }
     fn collect(&mut self) -> Result<(), RuntimeError> {
         if let Some(runtime) = &self.runtime {
@@ -210,9 +279,18 @@ pub fn call_frame(ctx: &Ctx<'_>, frame: &GuestFrame<'_>) -> rquickjs::Result<()>
     ]),))
 }
 
+/// The text of a guest failure: a thrown Error's message and stack (the
+/// frame function, a job), or the thrown value coerced to a string.
 fn engine_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
     if matches!(error, rquickjs::Error::Exception) {
         let value = ctx.catch();
+        if let Some(exception) = value.as_exception() {
+            let message = exception.message().unwrap_or_default();
+            return match exception.stack() {
+                Some(stack) if !stack.is_empty() => format!("{message}\n{stack}"),
+                _ => message,
+            };
+        }
         return Coerced::<String>::from_js(ctx, value)
             .map(|value| value.0)
             .unwrap_or_else(|_| error.to_string());
@@ -222,9 +300,6 @@ fn engine_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
 fn permitted(profile: BindingProfile, op: u16) -> bool {
     match profile {
         BindingProfile::Canonical => true,
-        BindingProfile::LegacyC => {
-            LEGACY_C_OPS.contains(&op) || (30..=32).contains(&op) || (52..=56).contains(&op)
-        }
         BindingProfile::Idf => IDF_OPS.contains(&op),
     }
 }
@@ -259,7 +334,12 @@ pub fn mount_ui<'js>(
                             if !line.is_empty() {
                                 line.push(' ');
                             }
-                            line.push_str(&string_value(&ctx, value, BindingProfile::Canonical)?);
+                            line.push_str(&string_value(
+                                &ctx,
+                                value,
+                                BindingProfile::Canonical,
+                                false,
+                            )?);
                         }
                         eprintln!("{line}");
                         Ok(())
@@ -287,9 +367,7 @@ pub fn mount_ui<'js>(
     }
     ui.set("__host", environment.host)?;
     ui.set("__hostAbi", environment.host_abi)?;
-    if profile != BindingProfile::LegacyC {
-        ui.set("__tickHz", environment.tick_hz)?;
-    }
+    ui.set("__tickHz", environment.tick_hz)?;
     let viewport = Object::new(ctx.clone())?;
     viewport.set("w", environment.viewport[0])?;
     viewport.set("h", environment.viewport[1])?;
@@ -326,10 +404,8 @@ pub fn mount_ui<'js>(
             return Err(Exception::throw_type(ctx, "__pak is already mounted"));
         }
         let pak = ArrayBuffer::new_copy(ctx.clone(), environment.pak)?;
-        if profile != BindingProfile::LegacyC {
-            unsafe {
-                rquickjs::qjs::JS_SetImmutableArrayBuffer(pak.as_value().as_raw(), true);
-            }
+        unsafe {
+            rquickjs::qjs::JS_SetImmutableArrayBuffer(pak.as_value().as_raw(), true);
         }
         globals.set("__pak", pak)?;
     }
@@ -337,8 +413,6 @@ pub fn mount_ui<'js>(
     // it, so `after(seconds)` counts frames at this rate.
     if environment.sim_hz != 0 {
         globals.set("__simHz", environment.sim_hz)?;
-    } else if profile == BindingProfile::LegacyC {
-        globals.set("__simHz", 60)?;
     }
     globals.set("ui", ui)
 }
@@ -416,13 +490,16 @@ fn string_value<'js>(
     ctx: &Ctx<'js>,
     value: Value<'js>,
     profile: BindingProfile,
+    empty_invalid: bool,
 ) -> rquickjs::Result<String> {
     let string = Coerced::<rquickjs::String>::from_js(ctx, value)?.0;
     let raw = string.to_cstring()?;
     let bytes = unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), raw.len()) };
+    if empty_invalid {
+        return Ok(std::str::from_utf8(bytes).unwrap_or("").to_owned());
+    }
     match profile {
         BindingProfile::Canonical => Ok(String::from_utf8_lossy(bytes).into_owned()),
-        BindingProfile::LegacyC => Ok(std::str::from_utf8(bytes).unwrap_or("").to_owned()),
         BindingProfile::Idf => std::str::from_utf8(bytes)
             .map(str::to_owned)
             .map_err(|_| Exception::throw_internal(ctx, "invalid UTF-8")),
@@ -477,11 +554,8 @@ fn invoke<'js>(
                 ArgKind::String => Prepared::String(string_value(
                     ctx,
                     value,
-                    if profile == BindingProfile::Idf && matches!(descriptor.id, 16 | 43) {
-                        BindingProfile::LegacyC
-                    } else {
-                        profile
-                    },
+                    profile,
+                    profile == BindingProfile::Idf && matches!(descriptor.id, 16 | 43),
                 )?),
                 ArgKind::Real => Prepared::Real(if optional || missing {
                     0.0
@@ -679,11 +753,7 @@ mod tests {
     }
     #[test]
     fn binding_generation_is_checked_before_creating_or_replacing_a_guest() {
-        for profile in [
-            BindingProfile::Canonical,
-            BindingProfile::LegacyC,
-            BindingProfile::Idf,
-        ] {
+        for profile in [BindingProfile::Canonical, BindingProfile::Idf] {
             let mut guest = RquickjsGuest::new(profile);
             let ops = OpContext::from_ui(pocketjs_core::Ui::new());
             for generation in (0..12).chain([BINDING_GENERATION + 1, u32::MAX]) {
@@ -715,11 +785,7 @@ mod tests {
     }
     #[test]
     fn host_owned_mount_rejects_other_generations_without_publishing_globals() {
-        for profile in [
-            BindingProfile::Canonical,
-            BindingProfile::LegacyC,
-            BindingProfile::Idf,
-        ] {
+        for profile in [BindingProfile::Canonical, BindingProfile::Idf] {
             let engine = Runtime::new().unwrap();
             let context = Context::full(&engine).unwrap();
             let ops = OpContext::from_ui(pocketjs_core::Ui::new());
@@ -791,11 +857,6 @@ mod tests {
             &idf,
             "(()=>{try{ui.uploadTexture(new ArrayBuffer(4),1,1,3);return false}catch(e){return e instanceof TypeError}})()"
         ));
-        let (legacy, _) = guest(BindingProfile::LegacyC);
-        assert!(evaluate::<bool>(
-            &legacy,
-            "!('wrapText' in ui) && !('__tickHz' in ui) && __simHz===30"
-        ));
     }
     #[test]
     fn detached_views_are_rejected_after_coercion_before_dispatch() {
@@ -836,6 +897,108 @@ mod tests {
             &guest,
             "received.length===9 && received[2][0]===0x40040000 && received[4][0]===1 && received[6][0].axis===1 && received[6][0].delta===-5 && received[7].timestamp===100 && received[8].length===2 && received[8][0].kind===2 && received[8][0].text==='hi' && received[8][1].kind===0 && received[8][1].text==='Enter' && received[8][1].repeat===false && drained"
         ));
+    }
+    #[test]
+    fn garbage_is_collected_before_the_heap_limit_with_the_live_heap_above_half_of_it() {
+        // the shell's case: a live heap near 70% of the limit, and every frame
+        // makes garbage that only a cycle collection frees
+        let ops = OpContext::from_ui(pocketjs_core::Ui::new());
+        let mut guest = RquickjsGuest::new(BindingProfile::Canonical);
+        let mut env = environment(None);
+        env.heap_limit = 16 << 20;
+        guest.initialize(ops, &env).unwrap();
+        guest
+            .evaluate(b"globalThis.keep=[];for(let i=0;i<10500;i++)keep.push('k'.repeat(1000)+i);globalThis.frames=0;globalThis.frame=()=>{for(let i=0;i<4000;i++){const a={pad:'g'.repeat(200)+i};const b={a};a.b=b}frames++}")
+            .unwrap();
+        let frame = GuestFrame {
+            buttons: 0,
+            analog: 0x8080,
+            touches: &[],
+            hits: &[],
+            touch_surfaces: &[],
+            right_analog: 0x8080,
+            axis_deltas: &[],
+            motion: None,
+            text: &[],
+        };
+        for i in 0..40 {
+            guest
+                .frame(&frame)
+                .unwrap_or_else(|_| panic!("frame {i}: {:?}", guest.last_error()));
+        }
+        assert_eq!(evaluate::<i32>(&guest, "frames"), 40);
+        assert_eq!(evaluate::<i32>(&guest, "keep.length"), 10500);
+    }
+    #[test]
+    fn a_turn_that_throws_leaves_the_threshold_below_the_limit() {
+        let limit = 16 << 20;
+        let ops = OpContext::from_ui(pocketjs_core::Ui::new());
+        let mut guest = RquickjsGuest::new(BindingProfile::Canonical);
+        let mut env = environment(None);
+        env.heap_limit = limit;
+        guest.initialize(ops, &env).unwrap();
+        let threshold = |guest: &RquickjsGuest| gc_threshold(guest.context.as_ref().unwrap());
+        // ~12 MB live, then an object: QuickJS collects and sets 1.5 times
+        // that, past the limit; then the evaluation throws
+        assert!(guest
+            .evaluate(b"globalThis.keep=[];for(let i=0;i<12000;i++)keep.push('k'.repeat(1000)+i);({});throw new Error('after the heap grew')")
+            .is_err());
+        assert!(guest.last_error().unwrap().contains("after the heap grew"));
+        assert!(
+            threshold(&guest) < limit,
+            "{} of {limit}",
+            threshold(&guest)
+        );
+        assert_eq!(threshold(&guest), guest.threshold_set);
+        // the same after a frame that throws, QuickJS made to collect in it
+        guest
+            .evaluate(b"globalThis.frame=()=>{({});throw new Error('frame threw')}")
+            .unwrap();
+        guest.runtime.as_ref().unwrap().set_gc_threshold(1);
+        let frame = GuestFrame {
+            buttons: 0,
+            analog: 0x8080,
+            touches: &[],
+            hits: &[],
+            touch_surfaces: &[],
+            right_analog: 0x8080,
+            axis_deltas: &[],
+            motion: None,
+            text: &[],
+        };
+        assert!(guest.frame(&frame).is_err());
+        assert!(guest.last_error().unwrap().contains("frame threw"));
+        assert!(
+            threshold(&guest) < limit,
+            "{} of {limit}",
+            threshold(&guest)
+        );
+        assert_eq!(threshold(&guest), guest.threshold_set);
+    }
+    #[test]
+    fn quickjs_sets_the_threshold_to_one_and_a_half_times_the_heap_a_collection_leaves() {
+        // keep_collection_below_limit infers the live heap from this; an
+        // rquickjs-sys whose QuickJS sets another threshold fails here
+        let runtime = Runtime::new().unwrap();
+        let context = Context::full(&runtime).unwrap();
+        context.with(|ctx| {
+            ctx.eval::<(), _>(
+                "globalThis.keep=[];for(let i=0;i<4000;i++)keep.push('k'.repeat(1000)+i)",
+            )
+            .unwrap()
+        });
+        // the next object QuickJS creates collects (an explicit run_gc
+        // leaves the threshold as it is)
+        runtime.set_gc_threshold(1);
+        context.with(|ctx| ctx.eval::<(), _>("({})").unwrap());
+        let threshold = gc_threshold(&context) as f64;
+        let heap = runtime.memory_usage().malloc_size as f64;
+        // what the evaluation allocated after the collection is a few KiB of ~4 MB
+        let ratio = threshold / heap;
+        assert!(
+            (1.45..=1.51).contains(&ratio),
+            "threshold {threshold} for a heap of {heap}"
+        );
     }
     #[test]
     fn evaluates_the_nul_terminated_source_span_returned_by_package_admission() {

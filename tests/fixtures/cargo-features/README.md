@@ -14,6 +14,8 @@ The declared parameters are:
 
 - `std`: standard library integration; `external-runtime`: the embedding Rust
   program owns allocator and panic handlers instead of the C archive.
+- `pocket-archive/software-renderer`: `pocket_runtime_create` registers the
+  software rasterizer as renderer 0 and `pocket_raster_draw_op` draws.
 - `counters` and `model-trace`: diagnostic counters and model tracing.
 - `critical-section`: portable atomics use the embedding critical-section
   implementation on targets without the required atomics.
@@ -24,12 +26,8 @@ The declared parameters are:
 - `mount`: enable optional `pocket-mod` and `anyhow` integration for a module.
 - `default`: the declared convenience group of the parameters above.
 
-`pocket-runtime-cabi` also exposes the documented `legacy-ui` compatibility
-parameters from its README. Only that namespace may use `gles1` and
-`software-only`; the canonical instance API selects drivers by registration.
-The test checks that the SDK's no-default-feature graph excludes every GLES
-crate, including when those compatibility parameters are passed without
-`legacy-ui`.
+The SDK test checks that the no-default-feature dependency graph of
+`pocket-archive` excludes every GLES crate.
 
 The list records exact dependency edges. Adding a selector to an existing
 parameter's expansion fails even if its feature name stays unchanged. Registry

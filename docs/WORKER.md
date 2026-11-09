@@ -38,6 +38,15 @@ them again.
 **Node and channel counts are host facts**: a host contract's `worker.nodes` table
 bounds each kind, and the worker protocol bounds a worker to **8** nodes and
 **8** channels.
+**Channel sizes are host facts**: every host holds records of **1024 bytes** in
+rings of **8**; a host contract's `worker.channels` states a larger channel, up
+to **64 KiB** records and rings of **256**. A size the manifest states must fit
+the target's (`worker.channelSize`); `"host"` takes the target's. The plan
+records numbers, the core allocates each channel at its declared size, and the
+UI bridge mirrors that many records of that many bytes each frame. A
+UI-to-worker record arrives as one fact, so a host whose records exceed its
+realm's per-turn bytes (`max_bytes`, 8192 by default) raises them; the Linux
+worker (`platforms/linux/worker`) takes 64 KiB a turn.
 **HTTP and MQTT exist only as worker resources**: no UI realm has a network
 module.
 The current resolver requires the worker. An `enhances` declaration with a UI
@@ -158,16 +167,16 @@ HTTP `open({url, method, headers, body, timeoutMs, maxBytes})` creates a request
 bytes. Facts deliver headers, body blocks and an end record with the final
 offset through `observe()`; the completion settles the request id. The 3DS
 provider uses Pocket Link `net.stream` and byte credits. It does not allocate a
-complete response body. The CardputerZero provider
-(`programs/cardputer-zero/src/http.rs`) reaches loopback addresses and the
-companion's control API; each request runs on its own thread and queues its
-facts, which the owner task emits when it waits or finishes a turn. Link socket
-servicing retains the system's service-loop cadence; worker JS execution has an
-independent task. Cancellation can report an unknown request outcome before
-native access ends. The stream's end fact remains the boundary of the retained
-prefix; a consumer that needs that prefix reads to the end fact before closing
-the resource. `apps/companion-zero/worker.ts` closes the resource from the
-completion, which ends the stream loop whether or not an end fact arrived.
+complete response body. The CardputerZero provider in Pocket Hub reaches
+loopback addresses and the companion's control API; each request runs on its own
+thread and queues its facts, which the owner task emits when it waits or
+finishes a turn. Link socket servicing retains the system's service-loop
+cadence; worker JS execution has an independent task. Cancellation can report an
+unknown request outcome before native access ends. The stream's end fact remains
+the boundary of the retained prefix; a consumer that needs that prefix reads to
+the end fact before closing the resource. The worker of Pocket Hub's
+CardputerZero screen closes the resource from the completion, which ends the
+stream loop whether or not an end fact arrived.
 
 `close()` stops admission and ends the resource's stream. Native drivers stop
 production and acknowledge the end of native buffer access before storage is
@@ -276,7 +285,8 @@ detach, and reports the cause through `pocket_worker_runner_error`.
 Channels take IDs in the order the app contract lists them. Snapshot channels retain the newest
 record; rings reject a publish when full. The v1 host copies channel records
 under a lock, which prevents writes during a reader's copy. Channels have one
-direction and a maximum record length. The worker side is
+direction and a maximum record length; `recordBytes` and `capacity` on a
+channel object read the sizes the plan resolved. The worker side is
 `io.channel(name)`: `publish(bytes)` toward the UI, `observe()` for each
 arriving inbound record and `snapshot()` for the retained newest inbound
 snapshot, which persists across turns until the generation changes. UI
@@ -288,7 +298,7 @@ UI views expire at the next frame.
 
 The core reserves **8 resource slots, 8 request slots, 8 event slots, 8 timers
 and 8 channels**. Each descriptor, result or event carries at most **1024
-bytes**. Terminal state has reserved storage outside the data event queue.
+bytes**; a channel's storage is allocated at its declared size. Terminal state has reserved storage outside the data event queue.
 Node pins, allowed device addresses, UART flow-control wiring, task priority
 and heap limits belong to the host firmware. **A platform can give the realm a
 CPU share** (`quota_micros` per `window_micros` in
@@ -305,7 +315,10 @@ executor, GPIO edges, command channels, remote worker replacement for
 `offload`, complete domain tape, TCP/UDP, generated board-node accessor
 types and UI fallback ownership tables remain unimplemented. UI-only hosts keep
 their offload module; HTTP is the worker's `io.http` resource. The 3DS routes
-it over Pocket Link; the CardputerZero routes it to its own loopback interface.
+it over Pocket Link. The Linux worker (`platforms/linux/worker`) hands it to
+the program's exchange: loopback servers in Pocket Hub's CardputerZero program,
+the daemon on Omarchy Pocket. pocket-m5's Tab5 firmware fetches it with its own
+HTTP and sends `companion.pocket` over the Pocket Link.
 
 QuickJS facts and SDK records allocate objects during a turn. The current
 runner disables threshold-triggered GC and runs GC while idle; it does not
@@ -318,7 +331,7 @@ in that domain.
 ## Validation
 
 ```sh
-bun test tests/worker.test.ts tests/worker-mqtt.test.ts tests/worker-http-stream.test.ts tests/host-services-link.test.ts
+bun test tests/worker.test.ts tests/worker-mqtt.test.ts tests/worker-http-stream.test.ts
 sh engine/worker/tests/run.sh /path/to/quickjs-ng
 bun tools/packaging/esp-idf/contracts.ts --check
 ```

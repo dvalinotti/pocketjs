@@ -155,7 +155,7 @@ export const LINK_REFUSAL = {
   version: "version",
 } as const;
 
-/** Companion services (tools/companion/services.ts): a worker's HTTP request
+/** Companion services (Pocket Hub's service host): a worker's HTTP request
  *  to this origin is answered by the companion itself, never fetched. The
  *  path's first segment names the service. */
 export const LINK_SERVICES_HOST = "companion.pocket";
@@ -164,6 +164,10 @@ export const LINK_SERVICES_ORIGIN = `https://${LINK_SERVICES_HOST}`;
 /** Features a companion may list in ready/paired. */
 export const LINK_FEATURE = {
   netStream: "net.stream",
+  /** Whole-response HTTP: `net` without `stream`, answered by one net.head
+   *  carrying the body's length and then the body. Consoles whose firmware
+   *  predates the worker domain (a UI realm `net` module) send only this. */
+  net: "net",
   catalog: "catalog",
   install: "install",
 } as const;

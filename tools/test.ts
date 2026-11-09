@@ -39,9 +39,7 @@ const SUITE: readonly Stage[] = [
     script: ["bun", "tests/contract.ts"],
   },
   {
-    // The C ABI allocator and PSM draw tests need the nightly toolchain
-    // selected by tools/build/toolchains/rust.ts. They run under
-    // .github/workflows/native-c-harness.yml.
+    // Native program and guest composition tests share this unit-test stage.
     name: "unit",
     // wasm-auxiliary.test.ts, wasm-premultiplied.test.ts, pocket3d-web.test.ts and runtime-glyphs.test.ts load platforms/web/pocketjs.wasm.
     prep: [["bun", "tools/wasm.ts"]],
@@ -130,7 +128,6 @@ const SUITE: readonly Stage[] = [
       "tests/worker.test.ts",
       "tests/worker-native.test.ts",
       "tests/worker-http-stream.test.ts",
-      "tests/pocket-input.test.ts",
       "tests/contact-latch.test.ts",
       "tests/compiler-portability.test.ts",
       "tests/platform-runtime.test.ts",
@@ -150,7 +147,6 @@ const SUITE: readonly Stage[] = [
       "tests/svg-texture-size.test.ts",
       "tests/touch.test.ts",
       "tests/desktop-pointer.test.ts",
-      "tests/desktop-cadence.test.ts",
       "tests/keyboard-touch.test.ts",
       "tests/caret-blink.test.ts",
       "tests/gesture.test.ts",
@@ -168,27 +164,16 @@ const SUITE: readonly Stage[] = [
       "tests/text.test.ts",
       "tests/text-layout-client.test.ts",
       "tests/clear-candidate-panel.test.ts",
-      "tests/android-icon.test.ts",
-      "tests/android-platform.test.ts",
-      "tests/android-platform-integration.test.ts",
-      "tests/blackberry-classic.test.ts",
       "tests/device-program-build.test.ts",
       "tests/device-source-inputs.test.ts",
       "tests/ios-profile.test.ts",
-      "tests/iphone2g-device-contract.test.ts",
-      "tests/iphone2g-device-transaction.test.ts",
-      "tests/iphone2g-profile.test.ts",
-      "tests/iphone2g-toolchain.test.ts",
-      "tests/iphone4s-profile.test.ts",
       "tests/ipodtouch-profile.test.ts",
       "tests/ipodtouch4-installation.test.ts",
       "tests/ipodtouch4-profile.test.ts",
       "tests/ipodtouch4-resources.test.ts",
+      "tests/ipodtouch4-native.test.ts",
       "tests/ipodtouch4-svcwire.test.ts",
-      "tests/meizu-m8-profile.test.ts",
-      "tests/moto-g-play-profile.test.ts",
       "tests/nativescript-bridge.test.ts",
-      "tests/redmi-1s-profile.test.ts",
       "tests/repack-ipod.test.ts",
       "tests/symbian-data.test.ts",
       "tests/symbian-device.test.ts",
@@ -196,18 +181,10 @@ const SUITE: readonly Stage[] = [
       "tests/symbian-package.test.ts",
       "tests/symbian-runtime.test.ts",
       "tests/symbian-toolchain.test.ts",
-      "tests/repack-android.test.ts",
       "tests/repack-worker.test.ts",
       "tests/offload-provider.test.ts",
       "tests/companion-session.test.ts",
       "tests/pocket-link.test.ts",
-      "tests/pocket-link-usb.test.ts",
-      "tests/pocket-agent.test.ts",
-      "tests/companion-youtube.test.ts",
-      "tests/companion-x.test.ts",
-      "tests/companion-glyphs.test.ts",
-      "tests/companion-services.test.ts",
-      "tests/companion-discord.test.ts",
       "tests/resource-cache.test.ts",
       "tests/font-config.test.ts",
       "tests/font-archive.test.ts",
@@ -374,8 +351,9 @@ const SUITE: readonly Stage[] = [
   {
     // The system agent's overlay over a fixture app on the 3DS geometry, with
     // the agent fake (programs/sim/console-3ds.ts). The test builds its guest
-    // with `bun tools/3ds.ts --plan=... --pocket-only`. Pocket Shell and the
-    // Hacker News app live in pocket-shell (shells/3ds) with their own sims.
+    // with `bun tools/3ds.ts --plan=... --pocket-only`. Pocket Shell lives in
+    // pocket-shell (shells/3ds) and the Hacker News applet in
+    // pocket-nexus/applets, each with its own sims.
     name: "agent overlay sim",
     prep: [
       ["bun", "tools/wasm.ts"],

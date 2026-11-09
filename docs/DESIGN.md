@@ -60,7 +60,7 @@ artifacts: `$JOB_TMP/map-*.json`).
   PSP bin wraps it with QuickJS + sceGu; `wasm32-unknown-unknown` build wraps
   it with a deterministic software rasterizer used by BOTH the browser dev
   host and headless Bun goldens. One layout engine everywhere.
-- **Damage is backend-independent**: `engine/present/src/damage.rs` compares
+- **Damage is backend-independent**: `engine/render/src/damage.rs` compares
   retained DrawLists and returns logical damage regions for one persistent
   framebuffer. RGBA8, PPA-memory ARGB8 and RGB565 software paths clear each
   region and replay the complete DrawList under a root clip; the presentation
@@ -68,13 +68,13 @@ artifacts: `$JOB_TMP/map-*.json`).
   that intersect it and `pocket-raster` applies the same rule there.
   Framebuffer format/scale signatures and `Ui::raster_revision()` prevent
   stale reuse. Region limits and full-redraw thresholds remain backend policy.
-- **ESP32-P4 stays 16-bit**: `platforms/esp-idf/render-ppa/` consumes the same
+- **ESP32-P4 stays 16-bit**: `devices/esp-idf/render-ppa/` consumes the same
   DrawList into an opaque RGB565 target. It maps flat fills, A8 coverage
   blending, and compatible PSM 5650 texture transforms to the PPA, then
   preserves ordering with `engine/raster` for unsupported ops.
   It never allocates a full-frame RGB888/ARGB8888 intermediate.
 - **SiFli renders into device-owned RGB565 framebuffers**:
-  `platforms/sifli/render-epic/` plans each damage rectangle against the
+  `devices/sifli/render-epic/` plans each damage rectangle against the
   executor's capabilities and emits fills, A8 blends, gradients, blits,
   four-point quads and tile copies; `platforms/sifli/epic/` runs them on EPIC
   through `HAL_EPIC_*` and, on SF32LB58, on VG Lite. The CPU never writes a
@@ -146,7 +146,7 @@ PocketJS/
     framework/src/lib.rs         extern "C" op mirror + byte-exact render() at 480×272;
                        renderScaled(1..4) rasterizes directly at physical density;
                        opt-in incremental exports retain and repaint damage regions
-  engine/present/src/damage.rs   DrawList diff, logical damage plans and per-target snapshots
+  engine/render/src/damage.rs    DrawList diff, logical damage plans and per-target snapshots
   engine/raster/src/lib.rs   shared deterministic scanline rasterizer used by wasm and
                        native capture (full and region-clipped RGBA/ARGB/RGB565)
   framework/src/                 TS/JS runtime shared by all hosts
@@ -283,7 +283,7 @@ children[], …}`) so reconciler *reads* never cross the FFI. Handles are `i32`
 | setFocus | `(idOr0)` | applies `focus:` variant natively |
 | loadStyles / loadFontAtlas | `(buf …)` | **web/test hosts only** — on PSP, Runtime admits the package and loads its assets into the shared core |
 | measureText | `(str, fontSlot) → width` | JS convenience; layout measures natively |
-| wrapText | `(str, fontSlot, maxW) → u32[]` | soft-wrap break columns for one line (ascending UTF-16 indices, empty = fits): greedy word wrap over the slot's measure provider; native-text hosts install the host text system's wrapper (gpui LineWrapper) and its positions win. Optional — apps fall back to the same greedy rules over measureText |
+| wrapText | `(str, fontSlot, maxW) → u32[]` | soft-wrap break columns for one line (ascending UTF-16 indices, empty = fits): greedy word wrap over the slot's measure provider; native-text hosts install the host text system's wrapper and its positions win. Optional — apps fall back to the same greedy rules over measureText |
 | loadTileTexture | `(pakKey, tileIndex) → handle` | decode ONE tile of a TILESET pak entry (spec.ts) into a CLUT8 texture, host-side — on PSP straight from `.rodata`, zero JS-heap transit. Hosts without it: the runtime falls back to `__pak` + uploadTexture (framework/src/tiles.ts) |
 | freeTexture | `(handle)` | releases a texture slot. Texture handles are **generation-tagged** like node ids (spec `TEX_SLOT_BITS`): a stale handle resolves to nothing and draws nothing — tile churn cannot sample a stranger's texture |
 | uploadImgEntry | `(blob) → handle` | self-contained IMG entry upload (v2: PSM_T8 palette, PackBits-RLE + linear-filter flags parsed core-side) |

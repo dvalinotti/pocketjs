@@ -85,7 +85,7 @@ ffmpeg -y -framerate 6 -i dist/handheld-models/hinge-frames/%03d.png \
 ## Shells for a page
 
 `shells.py` renders a device from the front for a page that shows its screens
-in it: the Pocket3D player (`devices/web/pocket-web-wgpu/web/shells`) and the
+in it: the Pocket3D player (`engine/pocket3d/crates/pocket-web-wgpu/web/shells`) and the
 MicroTS playground (`site/microts/shells`, which also shows the Pocket3D set's
 PSP and 3DS). An orthographic camera on the screen's axis, a transparent film,
 **14 pixels a millimetre** (20 for the iPod touch, 16 for the Android phone and
@@ -95,10 +95,10 @@ runs it and encodes the result.
 ```sh
 bun tools/handheld-shells.ts pocket3d              # all five: psp, vita, 3ds, ipod, android
 bun tools/handheld-shells.ts pocket3d 3ds --samples 64
-bun tools/handheld-shells.ts microts               # gba, iphone-4s, ipod-touch-5, bb-classic, ipod-nano
+bun tools/handheld-shells.ts microts               # gba, ipod-touch-5, ipod-nano
 ```
 
-The playground's GBA, iPhone 4S, iPod touch and BlackBerry are **other
+The playground's GBA and iPod touch are **other
 authors' models under CC BY 4.0, which this repository does not carry**.
 `downloads.json` names each one (title, author, Sketchfab page, SHA-256).
 The tool downloads a missing one into the ignored `dist/handheld-sources/`
@@ -128,7 +128,7 @@ held. The profile says where the screens, the controls and the parts are, and
 - The downloaded models are turned to the script's axes and brought to the
   device's size in millimetres (`glb`). A key that is pieces of one mesh is
   the pieces inside its rectangle, joined. A place that is only paint on a
-  model's picture (the BlackBerry's screen and the row under it) is found
+  model's picture  is found
   through the face whose texture coordinates hold it. A maker's name or logo
   is taken out of the mesh or painted over in the picture; a screen's picture
   gives way to a dark panel.

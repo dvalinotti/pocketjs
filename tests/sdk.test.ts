@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { POCKET_BINDING_GENERATION } from "../contracts/spec/binding-generation.ts";
 import { encodeIdentity, encodePocketPackage, POCKET_SECTION } from "../contracts/spec/pocket-package.ts";
 import { canonicalProfileJson, type PocketProfile } from "../contracts/spec/profile.ts";
+import { HOST_ABI_FUNCTIONS, RUNTIME_ABI_FUNCTIONS } from "../contracts/spec/runtime-abi.ts";
 import { profileFactsC } from "../tools/profile-export.ts";
 import { compilerRtMembers, exportSdk, parseSdkExport, verifySdk } from "../tools/sdk.ts";
 
@@ -17,7 +18,7 @@ test("SDK arguments preserve fixed archive policy and permit cross compiler conf
   expect(options.cargoArgs).toEqual(["-Zbuild-std=core,alloc", "--offline"]);
   expect(options.out).toBe(join(runDir, "sdk"));
   expect(options.toolchain).toBe("1.93.0");
-  for (const extra of ["--features=legacy-ui", "--all-features", "--package=other", "--profile=dev"]) {
+  for (const extra of ["--all-features", "--package=other", "--profile=dev"]) {
     expect(() => parseSdkExport(["--triple=host", "--out=sdk", `--cargo-arg=${extra}`])).toThrow("package/features/profile are fixed");
   }
   expect(() => parseSdkExport(["--triple=host", "--out=sdk", "--prepare=esp32p4", "--archiver=ar"])).toThrow("requires riscv32");
@@ -45,7 +46,7 @@ test.skipIf(!Bun.which("cmake") || !Bun.which("cc"))("exported SDK relocates and
   expect(manifest.abiFrozen).toBe(false);
   expect(manifest.hostAbi).toBe(POCKET_BINDING_GENERATION);
   expect(manifest.source.revision).toMatch(/^[0-9a-f]{40}$/);
-  expect(manifest.build).toMatchObject({ defaultFeatures: false, features: [], profile: "release" });
+  expect(manifest.build).toMatchObject({ defaultFeatures: false, features: ["physics", "software-renderer"], profile: "release" });
   expect(manifest.build.rustflags.slice(-2)).toEqual(["-C", "panic=abort"]);
   const sysroot = run(["rustup", "run", "stable", "rustc", "--print", "sysroot"], root).trim();
   const llvmNm = [join(sysroot, "lib/rustlib", triple, "bin/llvm-nm"), Bun.which("llvm-nm"), "/opt/homebrew/opt/llvm/bin/llvm-nm"].find(path => path && existsSync(path));
@@ -54,8 +55,10 @@ test.skipIf(!Bun.which("cmake") || !Bun.which("cc"))("exported SDK relocates and
     const match = /^[0-9a-fA-F]+\s+[TDBR]\s+_?(\w+)$/.exec(line.trim());
     return match ? [match[1]!] : [];
   }));
-  for (const symbol of ["pocket_runtime_create", "pocket_runtime_tick", "pocket_runtime_destroy", "pocket_raster_draw_op", "pocket_draw_list_visit"]) expect(symbols.has(symbol), symbol).toBe(true);
-  expect([...symbols].filter(symbol => /^(ui_|pocketjs_native_|pocketjs_idf_|pocket_legacy_runtime_)/.test(symbol))).toEqual([]);
+  // The archive defines every function pocket_runtime.h declares; the six host hooks stay the program's.
+  for (const fn of RUNTIME_ABI_FUNCTIONS) expect(symbols.has(fn.name), fn.name).toBe(true);
+  for (const fn of HOST_ABI_FUNCTIONS) expect(symbols.has(fn.name), fn.name).toBe(false);
+  expect([...symbols].filter(symbol => /^(ui_|pocketjs_native_|pocketjs_idf_)/.test(symbol))).toEqual([]);
   await expect(exportSdk(options)).rejects.toThrow("already exists");
   const metadata = JSON.parse(run(["cargo", "+stable", "metadata", "--locked", "--format-version=1", "--manifest-path", "Cargo.toml"], root));
   const quickjs = metadata.packages.find((pkg: { name: string }) => pkg.name === "rquickjs-sys").manifest_path.replace(/Cargo.toml$/, "quickjs");

@@ -31,6 +31,27 @@ describe("Cargo program and library graph", () => {
     }
   });
 
+  test("engine libraries do not depend on a program", () => {
+    for (const path of workspace.members.filter((path: string) => path.startsWith("engine/"))) {
+      const manifest = toml(`${path}/Cargo.toml`);
+      const groups = [manifest.dependencies, manifest["build-dependencies"], manifest["dev-dependencies"],
+        ...Object.values(manifest.target ?? {}).flatMap((target: any) =>
+          [target.dependencies, target["build-dependencies"], target["dev-dependencies"]])];
+      for (const dependencies of groups) {
+        for (const [name, value] of Object.entries(dependencies ?? {})) {
+          const dependency = value as any;
+          const effective = dependency.workspace ? workspace.dependencies[name] : dependency;
+          if (!effective?.path) continue;
+          const source = resolve(root, dependency.workspace ? "." : path, effective.path);
+          expect(source.startsWith(join(root, "programs") + "/"), `${path} -> ${source}`).toBe(false);
+        }
+      }
+    }
+    // The UI embedding crates that widgets, Pocket3D examples and pocketbook use live in engine/.
+    for (const name of ["pocket-ui-surface", "pocket-ui-wgpu"])
+      expect(workspace.dependencies[name].path, name).toStartWith("engine/");
+  });
+
   test("published features resolve consistently for an independent consumer", () => {
     const output = join(root, ".pocket-build/validation/cargo-features", `${Date.now()}-${process.pid}`);
     mkdirSync(output, { recursive: true });
@@ -76,13 +97,9 @@ describe("Cargo program and library graph", () => {
         expect(() => checkFeatureTree(independent), mode).not.toThrow();
         expect(active(independent), mode).toEqual(active(source));
       }
-      // SDK defaults disable legacy. Even passing old adapter parameters alone
-      // must not add a graphics backend to the canonical C interface.
-      for (const parameters of [[], ["--features", "gles1,software-only"]]) {
-        const sdk = command([...treeOptions, "-p", "pocket-runtime-cabi", "--no-default-features", ...parameters]);
-        expect(sdk).not.toMatch(/^pocket-gles[12]? (?:v|feature)/m);
-        expect(() => checkFeatureTree(sdk)).not.toThrow();
-      }
+      const sdk = command([...treeOptions, "-p", "pocket-archive", "--no-default-features"]);
+      expect(sdk).not.toMatch(/^pocket-gles[12]? (?:v|feature)/m);
+      expect(() => checkFeatureTree(sdk)).not.toThrow();
     } finally {
       rmSync(consumer, { recursive: true, force: true });
     }
@@ -91,6 +108,6 @@ describe("Cargo program and library graph", () => {
   test("the feature gate rejects selectors and undocumented resolved activation", () => {
     expect(() => checkFeatureTree('pocketjs-core feature "psp"')).toThrow("undocumented public feature");
     expect(() => checkFeatureTree('pocket-runtime v0.1.0 (/external/runtime)|profile-handheld')).toThrow("undocumented public feature");
-    expect(() => checkFeatureTree('pocket-runtime-cabi feature "gles1"')).not.toThrow();
+    expect(() => checkFeatureTree('pocket-archive feature "gles1"')).toThrow("undocumented public feature");
   });
 });

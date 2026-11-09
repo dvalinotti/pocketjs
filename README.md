@@ -24,7 +24,7 @@ one thread inside one process**. There is **no DOM, no CSS engine and no
 WebView**. PocketJS is a [Pocket Nexus](https://pocket.nexus) project.
 
 <a href="https://studio.pocket.nexus">
-  <img src="./assets/screenshots/pocket-studio-wall.jpg" alt="Twelve screens from Pocket Studio. Applets: Tokyo Weather, GitHub, Pocket Home, Hacker News, Discord, X and YouTube. Games: Pocket Duty, Pocket Tokyo, Pocket Requiem, Pocket Atlas and Pocket Maneuver." />
+  <img src="./assets/screenshots/pocket-studio-wall.jpg" alt="Twelve screens from Pocket Studio. Pocket Shell's home screen, and applets: Tokyo Weather, GitHub, Hacker News, Discord, X and YouTube. Games: Pocket Duty, Pocket Tokyo, Pocket Requiem, Pocket Atlas and Pocket Maneuver." />
 </a>
 
 Applets built with PocketJS and games built with Pocket3D, from
@@ -39,7 +39,7 @@ projects build on:
 | | What it is | Entry point |
 | --- | --- | --- |
 | **PocketJS** | The application runtime: TypeScript components, a QuickJS guest and a Rust core that lays out and draws every pixel | This README · [pocketjs.pocket.nexus](https://pocketjs.pocket.nexus) |
-| **Pocket3D** | A hardware-native 3D stack: device kernels for GXM, GE and PICA200, and the mechanisms that purpose-built 3D engines share | [`pocket3d/`](./pocket3d/README.md) · [3d.pocket.nexus](https://3d.pocket.nexus) |
+| **Pocket3D** | A hardware-native 3D stack: device kernels for GXM, GE and PICA200, and the mechanisms that purpose-built 3D engines share | [`engine/pocket3d/`](./engine/pocket3d/README.md) · [3d.pocket.nexus](https://3d.pocket.nexus) |
 | **MicroTS** | An ahead-of-time compiler from TypeScript views and models to Rust, in development | [`microts/`](./microts/README.md) · [microts.pocket.nexus](https://microts.pocket.nexus) |
 
 ## Contents
@@ -194,25 +194,6 @@ Seven samples per application. The two hero-demo rows come from separate runs
 with different toolchain versions, so each row is comparable internally but not
 against the other.
 
-### On a desktop
-
-Historical August 2026 results for the previous gpui host: the same markdown
-editor built three ways on an Apple M3 Max
-([full report](./docs/bench/gpui-vs-tauri-electron-2026-08-18.md), reproduced by
-`bun tools/bench-desktop.ts`):
-
-| | pocket | Tauri v2 | Electron |
-| --- | --- | --- | --- |
-| Processes | **1** | 4 | 5 |
-| Cold start to first painted frame | **149 ms** | 380 ms | 301 ms |
-| Idle resident memory | **83 MB** | 193 MB | 382 MB |
-| On disk | 10 MB | 9 MB | 242 MB |
-
-With a document open and no input, the pocket build redraws **about twice a
-second**, for the blinking caret. The report also records where the pocket
-build loses: its storm CPU rises with document length, because the editor
-re-wraps the whole document through the QuickJS interpreter on every keystroke.
-
 See also: [Shipping OpenStrike](https://pocketjs.pocket.nexus/blog/shipping-openstrike/) ·
 [Pocket Character](https://pocketjs.pocket.nexus/blog/pocket-character/) ·
 [Twice the pixels, zero forks](https://pocketjs.pocket.nexus/blog/pocketjs-on-ps-vita/) ·
@@ -260,7 +241,7 @@ content needs, such as networking, audio or 3D, and the rest never enters the
 build. The JavaScript uses them beside the same UI and input APIs.
 
 The full 3D stack is a project of its own in this repository.
-[Pocket3D](./pocket3d/README.md) gives a game **a renderer for each console's
+[Pocket3D](./engine/pocket3d/README.md) gives a game **a renderer for each console's
 GPU**, and its interface is a PocketJS app drawn over the scene:
 [3d.pocket.nexus](https://3d.pocket.nexus).
 
@@ -275,7 +256,7 @@ TypeScript application → guest bundle, one frame at a time
 
 See also: [Architecture](https://pocketjs.pocket.nexus/docs/architecture/) ·
 [The runtime family](./docs/RUNTIMES.md) ·
-[Pocket3D](./pocket3d/README.md)
+[Pocket3D](./engine/pocket3d/README.md)
 
 ## Choose your screen
 
@@ -289,21 +270,17 @@ contracts and build tools are maintained in this repository; see
 | --- | --- | --- |
 | PSP system software | MIPS, 32 MB | [Introducing PocketJS](https://pocketjs.pocket.nexus/blog/introducing-pocketjs/) |
 | PS Vita system software | ARM, GXM | [Twice the pixels, zero forks](https://pocketjs.pocket.nexus/blog/pocketjs-on-ps-vita/) |
-| iPhone OS 3.1.3 | ARMv6, GL ES 1.1 | [The first iPhone](https://pocketjs.pocket.nexus/blog/pocketjs-on-the-first-iphone/) |
-| iOS 6.1.3 | ARMv7 | [iPhone 4S runbook](./docs/IPHONE4S.md) |
 | iOS 12.5.8 | arm64 | [#278](https://github.com/pocket-nexus/pocketjs/pull/278) |
 | iOS, current | NativeScript host | [#256](https://github.com/pocket-nexus/pocketjs/pull/256) |
-| macOS | Metal window and widget | [#293](https://github.com/pocket-nexus/pocketjs/pull/293) |
+| macOS | Metal widgets | [Pocket Character](https://pocketjs.pocket.nexus/blog/pocket-character/) |
 | Symbian Belle | Qt, GLES2 | [Symbian wanted a frame function](https://pocketjs.pocket.nexus/blog/pocketjs-on-symbian/) |
-| Windows CE 6 | GDI framebuffer | [From message pump to multitouch](https://pocketjs.pocket.nexus/blog/pocketjs-on-windows-ce/) |
-| BlackBerry 10.3 | QNX, native ELF | [A Square Screen and a Dead Signing Server](https://pocketjs.pocket.nexus/blog/blackberry-classic/) |
 | PocketBook e-ink | inkview, partial refresh | [#172](https://github.com/pocket-nexus/pocketjs/pull/172) |
 | ESP-IDF 6.0/6.1 | P4 PPA or S3 software RGB565 | [ESP-IDF components](https://pocketjs.pocket.nexus/docs/esp-idf/) |
 | The browser | WebAssembly core | [Playground](https://pocketjs.pocket.nexus/playground/) |
 
 Devices it has booted on: **Sony PSP** (2004), **PS Vita** (2011),
-**iPhone** (2007), **iPhone 4S** (2011), **iPod touch 6** (2015),
-**Nokia E7** (2011), **Meizu M8** (2009), **BlackBerry Classic** (2014),
+**iPod touch 4** (2010), **iPod touch 6** (2015),
+**Nokia E7** (2011),
 **PocketBook reader** (e-ink), **ESP32-P4 devkit** (microcontroller) and
 **Mac** (Apple silicon). The Nintendo 3DS runs several of the applications in
 the next section.
@@ -325,7 +302,7 @@ links to the project, and most to the story of how it was built.
 | [**Pocket Voxel**](https://github.com/pocket-nexus/pocket-voxel) | PSP, PS Vita, web | A creature-RPG town rebuilt as a walking voxel diorama. Game state lives in the JS guest; logic runs at 60 Hz while presentation holds a locked 30 fps beat. [Story](https://pocketjs.pocket.nexus/blog/pocket-voxel/) |
 | [**Pocket Figma**](https://github.com/pocket-nexus/pocket-figma) | PSP, PS Vita | A 14,430-node design file, cooked into streamed tile pyramids and panned with the analog nub at 60 fps on a handheld with 32 MB of RAM. [Story](https://pocketjs.pocket.nexus/blog/pocket-figma/) |
 | [**Pocket YouTube**](https://github.com/pocket-nexus/pocket-youtube) | 3DS, PSP, PS Vita | Watch on the upper screen while searching and browsing on the touch screen. A Mac companion streams video to the 3DS over Wi-Fi. [Story](https://pocketjs.pocket.nexus/blog/pocket-youtube/) |
-| [**Pocket Shell**](https://github.com/pocket-nexus/pocket-shell) | 3DS | A tiling interface: windows on the upper screen, a workspace and control deck below |
+| [**Pocket Shell**](https://github.com/pocket-nexus/pocket-shell) | 3DS, M5Stack Tab5, PSP | A launcher for Pocket Applets: it pairs with Pocket Hub on a Mac, installs the applets Pocket Hub offers and switches between them |
 | [**Pocket Doc**](https://github.com/pocket-nexus/pocket-doc) | 3DS | A Markdown library on two screens: read above, edit and navigate below |
 | [**Pocket Map**](https://github.com/pocket-nexus/pocket-map) | 3DS, PSP | OpenStreetMap or Hyrule on a handheld: pan with the touchpad, zoom, search and save places through a paired Mac |
 | [**Pocket Term**](https://github.com/pocket-nexus/pocket-term) | 3DS | Mac shell sessions above a touch keyboard |
@@ -417,7 +394,7 @@ repository or the Rust AOT build.
 | [`framework/`](./framework/) | Public framework APIs, renderers, components, input, lifecycle and build-time styling |
 | [`engine/`](./engine/) | `no_std` UI core, render backends, native modules, Pocket3D and platform-native crates |
 | [`devices/`](./devices/) | Pocket3D device kernels for GXM, GE and PICA200 |
-| [`pocket3d/`](./pocket3d/) | The Pocket3D entry point: its design and a map of where its code lives |
+| [`engine/pocket3d/`](./engine/pocket3d/) | The Pocket3D entry point: its design and a map of where its code lives |
 | [`microts/`](./microts/) | The MicroTS ahead-of-time compiler |
 | [`contracts/`](./contracts/) | Generated wire specs, capability registry, app and host contract schemas, build plans and package formats |
 | [`programs/`](./programs/) | Runtime composition, entry points and native build recipes |
@@ -453,7 +430,7 @@ bun run site:preview          # build, then serve the site at http://127.0.0.1:4
 | Runtime internals | [Architecture](https://pocketjs.pocket.nexus/docs/architecture/) · [Native contract](https://pocketjs.pocket.nexus/docs/native-contract/) |
 | Targets and packaging | [Platform contracts](https://pocketjs.pocket.nexus/docs/platform-contracts/) · [The `.pocket` platform](./docs/PLATFORM.md) |
 | Debugging and verification | [DevTools](./docs/DEVTOOLS.md) · [Determinism](./docs/DETERMINISM.md) |
-| Runtimes beyond 2D UI | [The runtime family](./docs/RUNTIMES.md) · [Pocket3D](./pocket3d/README.md) |
+| Runtimes beyond 2D UI | [The runtime family](./docs/RUNTIMES.md) · [Pocket3D](./engine/pocket3d/README.md) |
 | Ahead-of-time compilation | [MicroTS](./microts/README.md) · [TypeScript support](./site/content/docs/typescript-support.md) |
 | Complete examples | [`apps/`](./apps/) · [Blog](https://pocketjs.pocket.nexus/blog/) |
 
@@ -483,9 +460,9 @@ capture-maintenance rules are recorded in
 PocketJS and MicroTS are [MIT licensed](./LICENSE). Inter is vendored under the
 OFL in [`assets/fonts/`](./assets/fonts/).
 
-Pocket3D, the files under [`pocket3d/`](./pocket3d/), [`devices/`](./devices/)
-and [`engine/pocket3d/`](./engine/pocket3d/), is under the
-[Pocket3D License](./pocket3d/LICENSE). It grants what the MIT License grants,
+Pocket3D, the files under [`devices/`](./devices/) and
+[`engine/pocket3d/`](./engine/pocket3d/), is under the
+[Pocket3D License](./engine/pocket3d/LICENSE). It grants what the MIT License grants,
 with one more condition: **a distributed product that draws 3D scenes with
 Pocket3D shows the Pocket3D title card when it starts**. PocketJS's own hosts
 and the applications built on them are exempt. A separate written license

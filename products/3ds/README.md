@@ -1,9 +1,9 @@
 # Nintendo 3DS product
 
-The 3DS product composes **one archive containing `pocket-runtime-cabi` and
-private recovery inspection** with the
-generated QuickJS guest, a package source, input source, PICA renderer and two
-display outputs. The runtime owns the retained tree, layout, animation, physics,
+The 3DS product composes **one archive containing `pocket-archive`, private
+recovery inspection and the native program without built-in outputs** with the
+handle-based QuickJS facade (`programs/native/quickjs`), the generated QuickJS
+guest, a package source, input source, PICA renderer and two display outputs. The runtime owns the retained tree, layout, animation, physics,
 package admission and frame coordination. The C device driver consumes the public
 DrawList and resource contracts and issues **PICA200 draws through citro3d**.
 
@@ -16,10 +16,11 @@ hardware and golden suite; the architecture migration has compiler, linker and
 host-test coverage.
 
 ```
-core/                 one runtime staticlib plus package recovery inspection ABI
+core/                 one runtime staticlib: package recovery inspection ABI and
+                      pocket-native-program with host-backend and host-hooks
 include/pocket_core.h package inspection and native resource convenience calls
 include/pocket_profile.h generated host contract facts, hash and operation identifiers
-src/instance.c        runtime, package/input/provider registration
+src/instance.c        package source; input, provider and output registration
 src/main.c            process boot, reusable guest lifecycle, frame boundary
 src/runtime.c         immutable package storage, active/rollback state
 src/devserver.c       discovery, paired TCP pump, uploads, screenshots, receipts
@@ -29,7 +30,8 @@ src/native.c          .3dsx staging, verification and swap for the dev connectio
 src/hbldr.c           Luma3DS hb:ldr requests that start a .3dsx on exit
 src/error_text.h      fixed-buffer error formatter
 src/gfx.c             PICA driver registration and product texture/scene adapters
-src/qjs.c             generated guest attachment and product namespaces
+src/qjs.c             facade host guest: realm, product namespaces, bytecode,
+                      worker start and stop around the program
 src/transition.c      app-switch overlay: scrim and activity indicator lists
 src/bytecode.c        a slot's bundle bytecode on the SD card
 src/services_host.c   host_services.h: clocks, owner name, sockets, SD slots
@@ -59,8 +61,31 @@ Two toolchains, one repository:
   `arm-none-eabi-gcc`, libctru, citro3d, `picasso`, `smdhtool` and `3dsxtool`.
 
 `tools/3ds.ts` drives both and hands this Makefile container paths in
-environment variables (the list is at the top of the Makefile).
-`src/instance.c` registers the PICA instance and both outputs.
+environment variables (the list is at the top of the Makefile). The Makefile
+also compiles `programs/native/quickjs/pocket_qjs_program.c` with
+`POCKET_QJS_HOST_PROFILE`: the facade takes the 3DS profile from `src/qjs.c`.
+
+## Composition
+
+**`src/qjs.c` boots each guest through the QuickJS facade with a host
+composition.** It creates the QuickJS realm and attaches the generated guest
+in canonical mode, then passes `pocket_qjs_program_create_host` the 3DS profile
+facts and hash, its `pocket_guest_v1` table and two hooks.
+`pocket_qjs_program_boot_source` creates the program from the package source
+in `src/instance.c`, with the plan's viewport, a 64 MiB guest heap and frame
+buffers for both screens. The runtime reads and admits the package at boot and
+loads its assets natively.
+
+The compose hook runs after the facade attaches the guest and before admission:
+`instance_attach` registers the input source, the product op provider, the
+PICA renderer and both displays on the program's runtime, then the worker
+starts for a package with a worker bundle. The program registers no output of
+its own, so the runtime's boot checks require the primary display and the
+profile's auxiliary display. The release hook detaches the worker bridge,
+stops the worker and forgets the runtime before the facade destroys the
+program, after a failed compose or boot as well as at `qjs_shutdown`. Frames
+call `pocket_runtime_present` and `pocket_runtime_tick` on the runtime that
+`pocket_qjs_program_runtime` returns.
 
 ```sh
 bun tools/3ds.ts 3ds-demo              # dist/3ds/<output>.3dsx
@@ -91,11 +116,13 @@ writes `this .3dsx carries no game: romfs:/app.pocket is missing` to the bottom
 screen and to `sdmc:/pocketjs-error.txt`, and waits for HOME.
 
 **The generic runtime is a separate program.** `programs/3ds` reads a file
-package and registers the generated guest, input source and two PICA displays.
-It has no product services, development server, camera, launcher or recovery
-state. Its `3ds-runtime` host contract accepts only the capabilities
-implemented by that program. The generic program links the default Runtime archive; this
-product links `core/` for its recovery inspection interface.
+package and registers the generated guest, input source and two PICA displays
+through the same QuickJS facade. It has no product services, development
+server, camera, launcher or recovery state. Its `3ds-runtime` host
+contract accepts only the capabilities implemented by that program. The
+generic program links the native program built without outputs or hooks; this
+product links `core/` for its recovery inspection interface and the same native
+program.
 
 Use `pocket build --target 3ds --generic` for that runtime and
 `pocket pack --runtime <build-directory> --pocket <application.pocket>` to
@@ -210,11 +237,18 @@ Pair once while ftpd is running, then restart Pocket Runtime:
 bun run 3ds:dev pair --host <device-ip> --ftp-port 5000
 ```
 
-**The pairing command generates a random 32-byte key, stores the local copy
-under `.pocket/3ds/devices/`, uploads the device copy, and verifies the FTP
-readback byte for byte.** The Runtime does not open a listener without the key,
-and a client must prove the complete key before any command or package byte is
-accepted.
+**The pairing command reads the console's key through ftpd first.** A console
+that holds a key keeps it, and the command stores the same 32 bytes on the
+computer; a console without one gets a random 32-byte key, uploaded and
+verified by an FTP readback byte for byte. `--rotate` replaces the console's
+key. **The computer keeps one file per console,
+`~/.pocketjs/3ds/keys/<device id>.key` (`$POCKETJS_3DS_KEYS` names another
+directory), shared by every tool that speaks this connection, Pocket Hub
+included** (`tools/3ds-keys.ts`). The device id is the FNV-1a64 of the key that
+discovery announces, as 16 hex digits. Keys a checkout stored under
+`.pocket/3ds/devices/` before are read and not written. The Runtime does not
+open a listener without the key, and a client must prove the complete key
+before any command or package byte is accepted.
 
 **The key authenticates a client but does not encrypt the TCP stream.** Use the
 listener on a trusted LAN, and pass `--rotate` to `pair` after a key is exposed.
@@ -586,8 +620,9 @@ own-screen frames, all over the Pocket Link. `main.c` filters the chord out of
 the guest's buttons, copies the touch screen into the monitor's texture at
 the start of the frame and calls `stage_render` in place of the primary
 surface's draw. `ui.captureTexts` / `ui.capturedTexts` read the texts a
-surface painted. The mechanism, the overlay and the companion side are in
-[docs/POCKET-AGENT.md](../../docs/POCKET-AGENT.md).
+surface painted. The mechanism and the overlay are in
+[docs/POCKET-AGENT.md](../../docs/POCKET-AGENT.md); the companion side runs in
+Pocket Hub.
 
 ## Product extensions
 
@@ -603,7 +638,7 @@ bun tools/3ds.ts <app> --project-root=<dir> --extension=<dir> --extension-romfs=
 | `<extension>/src/*.c` | Compiled with this product's flags and include paths. Implements every function in `include/pocket_extension.h` |
 | `--extension-romfs` | Files staged as `romfs:/extension` |
 
-**A plan with the capability and no `--extension` fails the build.** A binary without an extension refuses such a guest at boot. `main.c` calls the extension's tick before the frame, its frame begin after the previous frame retired, its render from the primary display's draw and its after-frame outside the frame. `agent_use_channel` gives it the microphone as `<feature>.audio`, and `link_feature_ready` says when the companion offers that feature. On the computer, `main()` in `tools/companion.ts` takes `LinkExtensionFactory` values, whose sessions receive `<feature>.*` messages.
+**A plan with the capability and no `--extension` fails the build.** A binary without an extension refuses such a guest at boot. `main.c` calls the extension's tick before the frame, its frame begin after the previous frame retired, its render from the primary display's draw and its after-frame outside the frame. `agent_use_channel` gives it the microphone as `<feature>.audio`, and `link_feature_ready` says when the companion offers that feature. On the computer, Pocket Hub's `main()` takes `LinkExtensionFactory` values, whose sessions receive `<feature>.*` messages.
 
 ## ZL and ZR
 
@@ -817,7 +852,7 @@ centered values. IRRST scanning stays in the host input adapter.
 ## Native QuickJS sources
 
 `tools/3ds-toolchain.ts` prepares a verified QuickJS checkout through
-`tools/native-source.ts`, shared with the BlackBerry native host. The 3DS pin
+`tools/native-source.ts`. The 3DS pin
 specifies a repository, full commit and source version. **Source preparation
 does not resolve the PSP Cargo dependency graph.** `ensureQuickJs` calls this
 preparation step before checking its compiler/source/image cache stamp.
