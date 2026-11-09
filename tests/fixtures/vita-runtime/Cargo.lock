@@ -50,105 +50,74 @@ dependencies = [
 ]
 
 [[package]]
-name = "pocket-draw-ops"
-version = "0.1.0"
+name = "pocket-archive"
+version = "0.16.0"
 dependencies = [
  "pocket-drivers",
+ "pocket-render",
+ "pocket-runtime",
  "pocket-spec",
 ]
 
 [[package]]
 name = "pocket-drivers"
-version = "0.1.0"
+version = "0.16.0"
 dependencies = [
- "pocket-spec",
-]
-
-[[package]]
-name = "pocket-glyph-pages"
-version = "0.1.0"
-dependencies = [
- "pocket-drivers",
  "pocket-spec",
 ]
 
 [[package]]
 name = "pocket-media"
-version = "0.1.0"
+version = "0.16.0"
 dependencies = [
  "pocket-spec",
 ]
 
 [[package]]
 name = "pocket-package"
-version = "0.1.0"
+version = "0.16.0"
 dependencies = [
  "pocket-drivers",
  "pocket-spec",
 ]
 
 [[package]]
-name = "pocket-present"
-version = "0.1.0"
+name = "pocket-physics"
+version = "0.16.0"
 dependencies = [
- "pocket-draw-ops",
- "pocket-drivers",
- "pocket-raster",
- "pocket-spec",
+ "pocketjs-core",
 ]
 
 [[package]]
 name = "pocket-profile-build"
-version = "0.1.0"
+version = "0.16.0"
 
 [[package]]
-name = "pocket-raster"
-version = "0.1.0"
+name = "pocket-render"
+version = "0.16.0"
 dependencies = [
- "pocket-draw-ops",
  "pocket-drivers",
  "pocket-spec",
 ]
 
 [[package]]
 name = "pocket-runtime"
-version = "0.1.0"
+version = "0.16.0"
 dependencies = [
  "pocket-drivers",
  "pocket-package",
- "pocket-present",
- "pocket-spec",
- "pocketjs-core",
-]
-
-[[package]]
-name = "pocket-runtime-cabi"
-version = "0.1.0"
-dependencies = [
- "pocket-draw-ops",
- "pocket-drivers",
- "pocket-glyph-pages",
- "pocket-raster",
- "pocket-runtime",
+ "pocket-render",
  "pocket-spec",
  "pocketjs-core",
 ]
 
 [[package]]
 name = "pocket-spec"
-version = "0.1.0"
-
-[[package]]
-name = "pocket-tex-cache"
-version = "0.1.0"
-
-[[package]]
-name = "pocket-tri-batch"
-version = "0.1.0"
+version = "0.16.0"
 
 [[package]]
 name = "pocket-vita-gxm"
-version = "0.1.0"
+version = "0.16.0"
 dependencies = [
  "vita2d-sys",
  "vitasdk-sys",
@@ -156,14 +125,11 @@ dependencies = [
 
 [[package]]
 name = "pocket-vita-render"
-version = "0.1.0"
+version = "0.16.0"
 dependencies = [
- "pocket-draw-ops",
  "pocket-drivers",
- "pocket-glyph-pages",
+ "pocket-render",
  "pocket-spec",
- "pocket-tex-cache",
- "pocket-tri-batch",
  "pocket-vita-gxm",
  "vita2d-sys",
  "vitasdk-sys",
@@ -175,11 +141,12 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "libquickjs-sys",
+ "pocket-archive",
  "pocket-drivers",
  "pocket-package",
+ "pocket-physics",
  "pocket-profile-build",
  "pocket-runtime",
- "pocket-runtime-cabi",
  "pocket-spec",
  "pocket-vita-render",
  "pocketjs-core",
@@ -187,14 +154,12 @@ dependencies = [
 
 [[package]]
 name = "pocketjs-core"
-version = "0.1.0"
+version = "0.16.0"
 dependencies = [
  "pocket-drivers",
- "pocket-glyph-pages",
  "pocket-media",
  "pocket-package",
- "pocket-present",
- "pocket-raster",
+ "pocket-render",
  "pocket-spec",
  "taffy",
 ]

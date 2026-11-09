@@ -8,6 +8,8 @@
 typedef struct {
   const uint8_t *javascript;
   size_t javascript_length;
+  const uint8_t *worker_javascript;
+  size_t worker_javascript_length;
   const uint8_t *pak;
   size_t pak_length;
   const uint8_t *plan;
@@ -34,20 +36,25 @@ typedef struct {
 #define POCKET_GUEST_FEATURE_AGENT 4u   /* features["system.agent"] */
 #define POCKET_GUEST_FEATURE_FS 8u      /* features["data.fs"] */
 #define POCKET_GUEST_FEATURE_CAMERA_QR 16u    /* features["camera.qr"] */
+#define POCKET_GUEST_FEATURE_EXTENSION 64u  /* features["system.extension"] */
 #define POCKET_GUEST_FEATURE_CAMERA_PHOTO 32u /* features["camera.photo"] */
 
-/* 0 = admitted. The package footer, target, host ABI, identity, plan and
- * NUL-terminated JS section are all checked before success; 13, 14 and 15
- * name a plan whose JSON, viewport or auxiliary surface cannot be read.
- * 16 = profile mismatch; 17 = malformed layout. The expected profile hash
- * is compiled into the program, never read from the package. */
+/* Returns the POCKET_PACKAGE_OPEN_* codes of pocket_runtime.h.
+ * POCKET_PACKAGE_OPEN_OK = admitted: the package footer, the first variant
+ * the exported profile facts admit, its identity, plan and NUL-terminated JS
+ * section are all checked before success. BINDING_GENERATION, PLAN and
+ * RASTER_DENSITY to AUXILIARY name the first failed admission item;
+ * PLAN_JSON, PLAN_VIEWPORT and PLAN_AUXILIARY a plan whose JSON, viewport or
+ * auxiliary surface cannot be read; BAD_LAYOUT a malformed layout;
+ * WORKER_SECTION a worker declaration and section that disagree. The facts
+ * and profile hash are compiled into the program, never read from the
+ * package; the hash only orders variants. */
 int32_t pocket_package_open(
   const uint8_t *bytes,
   size_t length,
-  const uint8_t *target,
-  size_t target_length,
+  const pocket_profile_facts *facts,
   uint32_t host_abi,
-  const uint8_t expected_profile_hash[32],
+  const uint8_t *profile_hash,
   PocketGuestPackage *out
 );
 

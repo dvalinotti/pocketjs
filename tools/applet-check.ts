@@ -1,7 +1,7 @@
 // tools/applet-check.ts — the source and bundle rules of a Pocket Applet
 // (docs/APPLETS.md lists them; contracts/spec/applet.ts holds the lists).
 //
-//   bun tools/applet-check.ts <pocket.json> [--project-root=<dir>] [--js=<bundle> --pak=<pak>]
+//   bun tools/applet-check.ts <pocket.app.json> [--project-root=<dir>] [--js=<bundle> --pak=<pak>]
 //
 // It walks the import graph from the entry (comments and types removed by
 // Bun's transpiler), checks every module the applet ships, and checks the
@@ -21,7 +21,6 @@ import {
   type AppletDeclaration,
   type ContractDiagnostic,
 } from "../contracts/spec/applet.ts";
-import { LINK_SERVICES_HOST } from "../contracts/spec/link.ts";
 import type { PocketManifestV2 } from "../contracts/spec/pocket-manifest.ts";
 import { validatePocketManifest } from "../framework/src/manifest/validate.ts";
 import { readPocketManifest } from "../framework/src/manifest/load.ts";
@@ -120,8 +119,6 @@ export function checkAppletSources(input: AppletSourceInput): ContractDiagnostic
   const out: ContractDiagnostic[] = [];
   const root = resolve(input.projectRoot);
   const modules = moduleGraph(input, out);
-  const services = new Set(input.applet.services ?? []);
-  const hosts = new Set(input.applet.hosts ?? []);
   let surface = false;
   for (const [path, code] of modules) {
     const at = relative(root, path);
@@ -136,29 +133,10 @@ export function checkAppletSources(input: AppletSourceInput): ContractDiagnostic
         }
       }
     }
-    for (const match of code.matchAll(/companionService\(\s*([^,)]+)/g)) {
-      const literal = match[1]!.trim().match(/^["'`]([a-z][a-z0-9-]*)["'`]$/);
-      if (!literal) {
-        out.push({ code: "applet.service", path: at, message: "companionService takes its service name as a string literal" });
-      } else if (!services.has(literal[1]!)) {
-        out.push({ code: "applet.service", path: at, message: `companion service ${literal[1]} is not in applet.services` });
-      }
-    }
-    for (const match of code.matchAll(/https?:\/\/([a-z0-9.-]+)(\/[a-z0-9-]*)?/gi)) {
-      const host = match[1]!.toLowerCase();
-      if (host === LINK_SERVICES_HOST) {
-        const name = match[2]?.slice(1);
-        if (name && !services.has(name)) {
-          out.push({ code: "applet.service", path: at, message: `companion service ${name} is not in applet.services` });
-        }
-      } else if (!hosts.has(host)) {
-        out.push({ code: "applet.host", path: at, message: `${host} is not in applet.hosts` });
-      }
-    }
-    if (/\bAuxiliarySurface\b/.test(code)) surface = true;
+    if (/\b(?:AuxiliarySurface|AppletSurface)\b/.test(code)) surface = true;
   }
   if (!surface) {
-    out.push({ code: "applet.surface", path: input.entry, message: "an applet draws its UI inside AuxiliarySurface" });
+    out.push({ code: "applet.surface", path: input.entry, message: "an applet draws its UI inside AppletSurface (or AuxiliarySurface)" });
   }
   return out;
 }
@@ -209,7 +187,7 @@ if (import.meta.main) {
   const manifestPath = args.find((arg) => !arg.startsWith("--"));
   const flag = (name: string) => args.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
   if (!manifestPath) {
-    console.error("usage: bun tools/applet-check.ts <pocket.json> [--project-root=<dir>] [--js=<bundle> --pak=<pak>]");
+    console.error("usage: bun tools/applet-check.ts <pocket.app.json> [--project-root=<dir>] [--js=<bundle> --pak=<pak>]");
     process.exit(2);
   }
   const diagnostics = checkApplet({

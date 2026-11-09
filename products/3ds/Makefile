@@ -16,6 +16,9 @@
 #   POCKETJS_SMDH_TITLE      SMDH metadata
 #   POCKETJS_SMDH_AUTHOR
 #   POCKETJS_SMDH_DESC
+#   POCKETJS_EXTENSION       a directory whose extension.mk adds a product extension
+#                            (include/pocket_extension.h)
+#   POCKETJS_EXTENSION_ROMFS the directory staged as romfs:/extension
 #   POCKETJS_CAPTURE         "1" builds the deterministic e2e binary
 #   POCKETJS_CAPTURE_INPUT   baked input tape, "frame:mask,frame:mask"
 #   POCKETJS_CAPTURE_TOUCH   baked touch tape, "frame:id,x,y@frame:-"
@@ -47,16 +50,21 @@ PLATFORM_SOURCE := $(POCKETJS_ROOT)/platforms/3ds
 SHARED := $(POCKETJS_ROOT)/engine/host-services
 OFFLOAD_INCLUDE := $(POCKETJS_ROOT)/engine/modules/offload/include
 POCKETJS_CONTRACTS := $(POCKETJS_ROOT)/contracts/generated
+POCKETJS_WORKER := $(POCKETJS_ROOT)/engine/worker
 POCKETJS_GUEST := $(POCKETJS_ROOT)/engine/guest-quickjs
+# The handle-based QuickJS facade and the native program header it composes;
+# libpocketjs_3ds_core.a links the program crate without built-in outputs.
+POCKETJS_NATIVE_QUICKJS := $(POCKETJS_ROOT)/programs/native/quickjs
+POCKETJS_NATIVE_PROGRAM_INCLUDE := $(POCKETJS_ROOT)/programs/native/runtime/include
 POCKETJS_PICA_INCLUDE ?= $(POCKETJS_ROOT)/devices/3ds/pocket-3ds-pica/include
 BUILD := $(POCKETJS_BUILD_DIR)
 OUT := $(POCKETJS_OUT_3DSX)
 # 3dsxtool reads the recovery guest out of a RomFS directory.
 ROMFS := $(BUILD)/romfs
-ICON ?= $(CURDIR)/icon.png
+ICON ?= $(PLATFORM_SOURCE)/icon.png
 # Custom large icons keep smdhtool's automatic reduction unless their caller
 # also supplies SMALL_ICON. The host default has a separate optical drawing.
-SMALL_ICON ?= $(if $(filter $(CURDIR)/icon.png,$(ICON)),$(CURDIR)/icon-small.png,)
+SMALL_ICON ?= $(if $(filter $(PLATFORM_SOURCE)/icon.png,$(ICON)),$(PLATFORM_SOURCE)/icon-small.png,)
 CIA := $(POCKETJS_OUT_CIA)
 RSF := $(CURDIR)/app.rsf
 
@@ -78,10 +86,10 @@ ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 # without it links cleanly and then hands the library differently shaped
 # values — the guest boots and QuickJS's GC walks garbage pointers.
 CFLAGS := -Wall -Wextra -O2 -g -std=gnu11 -mword-relocations -ffunction-sections -fdata-sections \
-  $(ARCH) -D__3DS__ -DJS_NO_NAN_BOXING -DPOCKET_QJS_BELLARD \
+  $(ARCH) -D__3DS__ -DPOCKETJS_WORKER_HTTP -DJS_NO_NAN_BOXING -DPOCKET_QJS_BELLARD \
   -DPOCKETJS_TARGET_ID='"$(POCKETJS_TARGET)"' \
   -DPOCKETJS_HOST_ABI=$(POCKETJS_HOST_ABI) \
-  -I$(PLATFORM_SOURCE) -I$(SHARED) -I$(OFFLOAD_INCLUDE) -I$(POCKETJS_CONTRACTS) -I$(POCKETJS_GUEST)/include -I$(BUILD) -I$(INCLUDE_DIR) -I$(CURDIR)/vendor -I$(POCKETJS_PICA_INCLUDE) -I$(POCKETJS_QUICKJS_DIR) \
+  -I$(POCKETJS_WORKER)/include -I$(PLATFORM_SOURCE) -I$(SHARED) -I$(OFFLOAD_INCLUDE) -I$(POCKETJS_CONTRACTS) -I$(POCKETJS_GUEST)/include -I$(POCKETJS_NATIVE_QUICKJS) -I$(POCKETJS_NATIVE_PROGRAM_INCLUDE) -I$(BUILD) -I$(INCLUDE_DIR) -I$(CURDIR)/vendor -I$(POCKETJS_PICA_INCLUDE) -I$(POCKETJS_QUICKJS_DIR) \
   -I$(DEVKITPRO)/libctru/include -I$(DEVKITPRO)/portlibs/3ds/include
 
 # bytecode.c keys its per-slot bytecode cache by the QuickJS build: the first
@@ -104,6 +112,9 @@ endif
 ifeq ($(POCKETJS_LOCALMEDIA),1)
 CFLAGS += -DPOCKETJS_LOCALMEDIA
 endif
+ifneq ($(POCKETJS_EXTENSION),)
+CFLAGS += -DPOCKETJS_EXTENSION -I$(SOURCE) -I$(POCKETJS_EXTENSION)/src
+endif
 
 ifeq ($(POCKETJS_CAPTURE),1)
 CFLAGS += -DPOCKETJS_CAPTURE \
@@ -123,11 +134,20 @@ LIBS := -ljpeg -lcitro3d -lctru -lm
 QUIRC_OBJECTS := $(BUILD)/quirc/quirc.o $(BUILD)/quirc/decode.o $(BUILD)/quirc/identify.o $(BUILD)/quirc/version_db.o
 # media.local (localmedia*.c) and its vendored decoders in vendor/.
 LOCALMEDIA_OBJECTS := $(BUILD)/localmedia.o $(BUILD)/localmedia_ids.o $(BUILD)/localmedia_tags.o $(BUILD)/localmedia_mp3.o $(BUILD)/localmedia_art.o $(BUILD)/localmedia_library.o $(BUILD)/localmedia_cache.o $(BUILD)/localmedia_dir.o $(BUILD)/localmedia_player.o $(BUILD)/localmedia_ring.o
-OBJECTS := $(BUILD)/pica_driver.o $(BUILD)/canonical_guest.o $(BUILD)/instance.o $(BUILD)/main.o $(BUILD)/media.o $(LOCALMEDIA_OBJECTS) $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/input_policy.o $(BUILD)/input_source.o $(BUILD)/hooks.o \
-  $(BUILD)/sha256.o $(BUILD)/jscan.o $(BUILD)/link_proto.o $(BUILD)/link.o $(BUILD)/launcher.o $(BUILD)/services_host.o \
+OBJECTS := $(BUILD)/worker.o $(BUILD)/worker_core.o $(BUILD)/worker_quickjs.o $(BUILD)/worker_quickjs_ui.o $(BUILD)/worker_runner.o $(BUILD)/pica_driver.o $(BUILD)/canonical_guest.o $(BUILD)/qjs_program.o $(BUILD)/instance.o $(BUILD)/main.o $(BUILD)/media.o $(LOCALMEDIA_OBJECTS) $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/input_policy.o $(BUILD)/input_source.o $(BUILD)/hooks.o \
+  $(BUILD)/sha256.o $(BUILD)/jscan.o $(BUILD)/link_proto.o $(BUILD)/link.o $(BUILD)/link_http.o $(BUILD)/launcher.o $(BUILD)/services_host.o \
   $(BUILD)/wifi.o $(BUILD)/camera.o \
   $(BUILD)/stage.o $(BUILD)/agent.o $(QUIRC_OBJECTS) $(BUILD)/vshader_shbin.o $(BUILD)/stage_shbin.o \
   $(BUILD)/photos.o $(BUILD)/photos_image.o $(BUILD)/photos_jpeg.o $(BUILD)/fs.o $(BUILD)/transition.o $(BUILD)/bytecode.o
+# A product extension's extension.mk adds to OBJECTS and LIBS, sets EXTENSION_HEADERS
+# to what its objects include, and writes its own rules for generated files.
+.DEFAULT_GOAL := all
+EXTENSION_ROMFS_STAMP :=
+EXTENSION_HEADERS :=
+ifneq ($(POCKETJS_EXTENSION),)
+include $(POCKETJS_EXTENSION)/extension.mk
+EXTENSION_ROMFS_STAMP := $(BUILD)/extension-romfs.stamp
+endif
 ELF := $(BUILD)/pocketjs-3ds.elf
 SMDH := $(BUILD)/pocketjs-3ds.smdh
 
@@ -181,11 +201,32 @@ $(FLAGS_STAMP): $(FLAGS_STAMP).probe ;
 $(BUILD)/pica_driver.o: $(POCKETJS_ROOT)/devices/3ds/pocket-3ds-pica/src/driver.c $(wildcard $(POCKETJS_PICA_INCLUDE)/*.h) $(wildcard $(POCKETJS_CONTRACTS)/*.h) $(FLAGS_STAMP) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD)/worker_core.o: $(POCKETJS_WORKER)/src/worker.c $(wildcard $(POCKETJS_WORKER)/include/pocket/*.h) $(FLAGS_STAMP) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/worker_quickjs.o: $(POCKETJS_WORKER)/src/quickjs.c $(wildcard $(POCKETJS_WORKER)/include/pocket/*.h) $(FLAGS_STAMP) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/worker_quickjs_ui.o: $(POCKETJS_WORKER)/src/quickjs_ui.c $(wildcard $(POCKETJS_WORKER)/include/pocket/*.h) $(FLAGS_STAMP) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/worker_runner.o: $(POCKETJS_WORKER)/src/runner.c $(wildcard $(POCKETJS_WORKER)/include/pocket/*.h) $(FLAGS_STAMP) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 $(BUILD)/canonical_guest.o: $(POCKETJS_GUEST)/src/guest.c $(wildcard $(POCKETJS_GUEST)/src/*.h) $(wildcard $(POCKETJS_GUEST)/include/*.h) $(wildcard $(POCKETJS_CONTRACTS)/*.h) $(FLAGS_STAMP) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(INCLUDE_DIR)/*.h) $(wildcard $(SOURCE)/*.h) $(wildcard $(SHARED)/*.h) $(wildcard $(PLATFORM_SOURCE)/*.h) $(wildcard $(OFFLOAD_INCLUDE)/*.h) $(wildcard $(POCKETJS_CONTRACTS)/*.h) $(wildcard $(POCKETJS_PICA_INCLUDE)/*.h) $(BUILD)/vshader_shbin.h $(BUILD)/stage_shbin.h $(FLAGS_STAMP) | $(BUILD)
+# The facade takes the 3DS profile from qjs.c, not a compiled host profile.
+$(BUILD)/qjs_program.o: $(POCKETJS_NATIVE_QUICKJS)/pocket_qjs_program.c $(wildcard $(POCKETJS_NATIVE_QUICKJS)/*.h) $(wildcard $(POCKETJS_NATIVE_PROGRAM_INCLUDE)/*.h) $(wildcard $(POCKETJS_GUEST)/include/*.h) $(wildcard $(POCKETJS_CONTRACTS)/*.h) $(FLAGS_STAMP) | $(BUILD)
+	$(CC) $(CFLAGS) -DPOCKET_QJS_HOST_PROFILE -c $< -o $@
+
+$(BUILD)/%.o: $(SOURCE)/%.c $(wildcard $(INCLUDE_DIR)/*.h) $(wildcard $(SOURCE)/*.h) $(wildcard $(SHARED)/*.h) $(wildcard $(PLATFORM_SOURCE)/*.h) $(wildcard $(OFFLOAD_INCLUDE)/*.h) $(wildcard $(POCKETJS_CONTRACTS)/*.h) $(wildcard $(POCKETJS_PICA_INCLUDE)/*.h) $(BUILD)/vshader_shbin.h $(BUILD)/stage_shbin.h $(EXTENSION_HEADERS) $(FLAGS_STAMP) | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+ifneq ($(POCKETJS_EXTENSION),)
+$(BUILD)/%.o: $(POCKETJS_EXTENSION)/src/%.c $(wildcard $(INCLUDE_DIR)/*.h) $(wildcard $(SOURCE)/*.h) $(wildcard $(POCKETJS_EXTENSION)/src/*.h) $(wildcard $(SHARED)/*.h) $(wildcard $(PLATFORM_SOURCE)/*.h) $(wildcard $(OFFLOAD_INCLUDE)/*.h) $(wildcard $(POCKETJS_CONTRACTS)/*.h) $(wildcard $(POCKETJS_PICA_INCLUDE)/*.h) $(BUILD)/vshader_shbin.h $(BUILD)/stage_shbin.h $(EXTENSION_HEADERS) $(FLAGS_STAMP) | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+endif
 
 # Platform mechanisms compile from their own source tree; product policy stays
 # in SOURCE and supplies the media resource callback.
@@ -217,6 +258,7 @@ $(BUILD)/main.o $(BUILD)/qjs.o $(BUILD)/gfx.o: $(PLATFORM_SOURCE)/media.h
 $(BUILD)/main.o $(BUILD)/transition.o: $(SOURCE)/transition.h
 $(BUILD)/main.o $(BUILD)/bytecode.o: $(SOURCE)/bytecode.h
 $(BUILD)/main.o $(BUILD)/qjs.o: $(SOURCE)/qjs.h
+$(BUILD)/qjs.o $(BUILD)/instance.o: $(POCKETJS_NATIVE_QUICKJS)/pocket_qjs_program.h $(POCKETJS_NATIVE_PROGRAM_INCLUDE)/pocket_native_program.h
 $(BUILD)/main.o $(BUILD)/gfx.o: $(SOURCE)/gfx.h
 $(BUILD)/localmedia_player.o: $(CURDIR)/vendor/minimp3.h
 $(BUILD)/localmedia_art.o: $(CURDIR)/vendor/stb_image.h
@@ -247,6 +289,20 @@ $(ROMFS)/app.pocket: $(POCKETJS_APP_POCKET) romfs-inputs $(ROMFS_LAYOUT_STAMP) |
 	@cmp -s "$@.new" "$@" || mv "$@.new" "$@"
 	@rm -f "$@.new"
 
+# romfs:/extension: the extension's files. The stamp changes only when a file changed.
+ifneq ($(EXTENSION_ROMFS_STAMP),)
+.PHONY: $(EXTENSION_ROMFS_STAMP).probe
+$(EXTENSION_ROMFS_STAMP).probe: | $(ROMFS)
+	@mkdir -p $(ROMFS)/extension
+	@changed=0; for file in "$(POCKETJS_EXTENSION_ROMFS)"/*; do \
+	  test -e "$$file" || continue; \
+	  name=$$(basename "$$file"); \
+	  if ! cmp -s "$$file" "$(ROMFS)/extension/$$name"; then cp "$$file" "$(ROMFS)/extension/$$name"; changed=1; fi; \
+	done; \
+	if test $$changed -eq 1 || test ! -e $(EXTENSION_ROMFS_STAMP); then touch $(EXTENSION_ROMFS_STAMP); fi
+$(EXTENSION_ROMFS_STAMP): $(EXTENSION_ROMFS_STAMP).probe ;
+endif
+
 # 3dsxtool refuses to embed a RomFS without SMDH metadata, so one is always
 # built, from the app's own strings over the host's icon. The strings affect
 # the artifact but are not files, so a content stamp invalidates the SMDH when
@@ -266,7 +322,7 @@ $(SMDH): $(ICON) $(SMALL_ICON) $(SMDH_STAMP) | $(BUILD)
 	  "$$POCKETJS_SMDH_AUTHOR" $(ICON) $@ $(SMALL_ICON)
 
 ifneq ($(POCKETJS_APP_POCKET),)
-$(OUT): $(ELF) $(SMDH) $(ROMFS)/app.pocket $(ROMFS_LAYOUT_STAMP)
+$(OUT): $(ELF) $(SMDH) $(ROMFS)/app.pocket $(ROMFS_LAYOUT_STAMP) $(EXTENSION_ROMFS_STAMP)
 	mkdir -p $(dir $(OUT))
 	$(THREEDSXTOOL) $(ELF) $@ --romfs=$(ROMFS) --smdh=$(SMDH)
 else

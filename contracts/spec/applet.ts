@@ -4,12 +4,14 @@
 //
 //   - one program runs on every launcher host: one touch surface that admits
 //     the 320x240 baseline (fixed at it, or adaptive across a range holding
-//     it), no primary display, input the host maps to its own buttons;
+//     it), no primary display, input the host maps to its own buttons; and,
+//     when the applet adds its full-screen presentation, the whole screen of
+//     a device with one screen and no touch (the PSP), by the same entry;
 //   - the system agent can read and operate it: system.agent is declared,
 //     the UI is Solid on the PocketJS components, so the agent's text capture
 //     and played input reach every control;
 //   - a generated (UGC, model-written) applet can be admitted by checks
-//     alone: a capability allowlist, declared network destinations, no
+//     alone: a capability allowlist, declared companion services, no
 //     native code, no code evaluation, size budgets.
 //
 // The manifest rules below are checked when a plan resolves (framework/src/
@@ -23,25 +25,29 @@ const APPLET_VERSION = 1 as const;
 /** The manifest section. */
 export interface AppletDeclaration {
   readonly version: typeof APPLET_VERSION;
-  /** Companion services the applet fetches (`companionService(name, …)`,
-   *  contracts/spec/link.ts LINK_SERVICES_ORIGIN). */
+  /** One sentence on what the applet does, shown where it is offered (the
+   *  console's store, Pocket Hub's list). */
+  readonly summary?: string;
+  /** Companion services the applet's worker fetches at
+   *  `https://companion.pocket/<name>/…` (contracts/spec/link.ts
+   *  LINK_SERVICES_ORIGIN) through io.http. */
   readonly services?: readonly string[];
-  /** Hosts the applet fetches directly through net.http. */
+  /** Host names outside the companion that the applet's worker fetches. A
+   *  host that installs applets from a store shows them before an install,
+   *  and its http node refuses other hosts to an app the store installed. */
   readonly hosts?: readonly string[];
-  /** Persistent state: required to declare data.fs or data.sqlite; the host
+  /** Persistent state: required to declare data.fs; the host
    *  confines the store to the applet and to this many bytes. */
   readonly store?: { readonly maxBytes: number };
 }
+
+/** The longest summary, in UTF-16 units: one line of the console's store. */
+export const APPLET_SUMMARY_MAX = 120;
 
 /** The largest store an applet may declare: 4 MiB. */
 export const APPLET_STORE_MAX_BYTES = 4 * 1024 * 1024;
 
 const serviceNameSchema = { type: "string", pattern: "^[a-z][a-z0-9-]{0,31}$" } as const satisfies JsonSchema;
-const hostSchema = {
-  type: "string",
-  maxLength: 253,
-  pattern: "^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$",
-} as const satisfies JsonSchema;
 
 export const appletSchema = {
   type: "object",
@@ -49,8 +55,9 @@ export const appletSchema = {
   required: ["version"],
   properties: {
     version: { const: APPLET_VERSION },
+    summary: { type: "string", minLength: 1, maxLength: APPLET_SUMMARY_MAX },
     services: { type: "array", items: serviceNameSchema, uniqueItems: true, maxItems: 8 },
-    hosts: { type: "array", items: hostSchema, uniqueItems: true, maxItems: 8 },
+    hosts: { type: "array", items: { type: "string", pattern: "^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$", maxLength: 253 }, uniqueItems: true, maxItems: 16 },
     store: {
       type: "object",
       additionalProperties: false,
@@ -67,8 +74,18 @@ const APPLET_SURFACE = [320, 240] as const;
 /** The longest title: what a springboard label and the agent's app list show. */
 const APPLET_TITLE_MAX = 24;
 
-/** Capabilities every applet requires: its surface and its input. */
+/** Capabilities of the touch surface: every applet requires them, unless it
+ *  adds the full-screen presentation; then the baseline enhances them and
+ *  serves the devices that have the surface. */
 const APPLET_REQUIRED = ["display.auxiliary", "input.touch.auxiliary"] as const;
+
+/** The one presentation an applet may add: the full screen of a device with
+ *  one screen and no touch (the PSP), driven by its buttons. The entry is
+ *  app.entry, so one program lays out for either surface
+ *  (@pocketjs/framework/applet). */
+export const APPLET_FULL_SCREEN_MODALITY = { screens: 1, touch: "none", buttons: true } as const;
+/** What the baseline serves when the full-screen presentation exists. */
+const APPLET_BASELINE_MODALITY = { touch: "auxiliary" } as const;
 /** Capabilities every applet enhances: the system agent operates it. */
 const APPLET_ENHANCED = ["system.agent"] as const;
 
@@ -88,12 +105,11 @@ const APPLET_CAPABILITIES = [
   "audio.pcm",
   "media.playback",
   "data.fs",
-  "data.sqlite",
   "system.agent",
 ] as const;
 const APPLET_CAPABILITY_PREFIXES = ["camera."] as const;
 /** Capabilities that need `applet.store`. */
-const APPLET_STORE_CAPABILITIES = ["data.fs", "data.sqlite"] as const;
+const APPLET_STORE_CAPABILITIES = ["data.fs"] as const;
 
 /** Size budgets of a built applet (the guest bundle and its pak). */
 export const APPLET_BUDGET = { jsBytes: 640 * 1024, pakBytes: 3 * 1024 * 1024 } as const;
@@ -101,6 +117,8 @@ export const APPLET_BUDGET = { jsBytes: 640 * 1024, pakBytes: 3 * 1024 * 1024 } 
 /** `@pocketjs/framework/<subpath>` modules an applet may import. */
 export const APPLET_MODULES = [
   "solid",
+  "applet",
+  "modality",
   "components",
   "lifecycle",
   "input",
@@ -108,7 +126,6 @@ export const APPLET_MODULES = [
   "clock",
   "host",
   "renderer",
-  "net",
   "link",
   "gesture",
   "kinetics",
@@ -122,11 +139,15 @@ export const APPLET_MODULES = [
   "display",
   "platform",
 ] as const;
-/** Modules allowed when the manifest declares the capability that gates them. */
+/** Modules allowed when the manifest declares the capability that gates them.
+ *  `worker/channels` is the UI's side of the applet's own worker
+ *  (`domains.worker`): an applet's network is that worker's `io.http`
+ *  resource, the only node an applet's capabilities admit, so the UI module
+ *  that reads the worker comes with `net.http`. */
 export const APPLET_GATED_MODULES: Readonly<Record<string, readonly string[]>> = {
   camera: APPLET_CAPABILITY_PREFIXES,
   fs: ["data.fs"],
-  db: ["data.sqlite"],
+  "worker/channels": ["net.http"],
 };
 /** Exports of @pocketjs/framework/link that act for the system: installing,
  *  removing and pairing belong to the launcher. */
@@ -150,6 +171,14 @@ export function capabilityMatches(id: string, pattern: string): boolean {
   return pattern.endsWith(".") ? id.startsWith(pattern) : id === pattern;
 }
 
+/** Two modality requirements with the same fields and values. */
+function sameRequirement(a: object | undefined, b: object): boolean {
+  if (!a) return false;
+  const left = Object.entries(a).filter(([, value]) => value !== undefined);
+  const right = Object.entries(b);
+  return left.length === right.length && right.every(([key, value]) => (a as Record<string, unknown>)[key] === value);
+}
+
 function appletCapabilityAllowed(id: string): boolean {
   return [...APPLET_CAPABILITIES, ...APPLET_CAPABILITY_PREFIXES].some((pattern) => capabilityMatches(id, pattern));
 }
@@ -170,7 +199,32 @@ export function appletManifestDiagnostics(manifest: PocketManifestV2): ContractD
   if (manifest.app.framework !== "solid") push("framework", "/app/framework", "an applet is a Solid app");
   if (manifest.app.model === "rust") push("nativeModel", "/app/model", "an applet ships no native code: model \"rust\" is not allowed");
   if (manifest.app.companions?.length) push("companions", "/app/companions", "an applet reaches the companion through applet.services, not svc companions");
-  if (manifest.app.presentations?.length) push("presentations", "/app/presentations", "an applet has one presentation: its touch surface");
+  const presentations = manifest.app.presentations ?? [];
+  const fullScreen = presentations.length > 0;
+  if (presentations.length > 1) {
+    push("presentations", "/app/presentations", "an applet adds at most one presentation: the full screen of a single-screen device");
+  }
+  presentations.forEach((presentation, index) => {
+    const at = `/app/presentations/${index}`;
+    if (presentation.entry !== manifest.app.entry) {
+      push("presentationEntry", `${at}/entry`, "an applet is one program: its full-screen presentation runs app.entry");
+    }
+    if (!sameRequirement(presentation.modality, APPLET_FULL_SCREEN_MODALITY)) {
+      push("presentationModality", `${at}/modality`, `the full-screen presentation serves ${JSON.stringify(APPLET_FULL_SCREEN_MODALITY)}`);
+    }
+    if (presentation.surfaces) push("presentationSurfaces", `${at}/surfaces`, "the full-screen presentation draws on the screen itself, not an auxiliary surface");
+    if (presentation.output !== undefined) push("presentationOutput", `${at}/output`, "the full-screen presentation keeps app.output: it is the same applet");
+    const capabilities = [...(presentation.capabilities?.requires ?? []), ...(presentation.capabilities?.enhances ?? [])];
+    for (const id of capabilities) {
+      if (!appletCapabilityAllowed(id)) push("capability", `${at}/capabilities`, `${id} is not available to applets`);
+    }
+  });
+  if (fullScreen && !sameRequirement(manifest.app.modality, APPLET_BASELINE_MODALITY)) {
+    push("baselineModality", "/app/modality", `an applet with a full-screen presentation serves ${JSON.stringify(APPLET_BASELINE_MODALITY)} with app.entry`);
+  }
+  if (fullScreen && !requires.includes("input.buttons")) {
+    push("buttons", "/engine/capabilities/requires", "an applet with a full-screen presentation requires input.buttons: the full screen has no touch");
+  }
   const surface = manifest.app.surfaces?.auxiliary;
   const [baseW, baseH] = APPLET_SURFACE;
   const admitsBaseline = surface?.adaptive
@@ -185,7 +239,9 @@ export function appletManifestDiagnostics(manifest: PocketManifestV2): ContractD
     );
   }
   for (const id of APPLET_REQUIRED) {
-    if (!requires.includes(id)) push("required", "/engine/capabilities/requires", `an applet requires ${id}`);
+    if (fullScreen) {
+      if (!enhances.includes(id)) push("surfaceEnhanced", "/engine/capabilities/enhances", `an applet with a full-screen presentation enhances ${id}: the touch surface is the baseline's`);
+    } else if (!requires.includes(id)) push("required", "/engine/capabilities/requires", `an applet requires ${id}`);
   }
   for (const id of APPLET_ENHANCED) {
     if (!declared.includes(id)) push("agent", "/engine/capabilities/enhances", `an applet enhances ${id}, so the system agent can operate it`);
@@ -197,8 +253,7 @@ export function appletManifestDiagnostics(manifest: PocketManifestV2): ContractD
     }
   });
   const usesStore = declared.some((id) => (APPLET_STORE_CAPABILITIES as readonly string[]).includes(id));
-  if (usesStore && !applet.store) push("store", "/applet/store", "data.fs and data.sqlite need applet.store with maxBytes");
-  const network = (applet.services?.length ?? 0) + (applet.hosts?.length ?? 0) > 0;
-  if (network && !declared.includes("net.http")) push("network", "/engine/capabilities", "applet.services and applet.hosts need net.http");
+  if (usesStore && !applet.store) push("store", "/applet/store", "data.fs needs applet.store with maxBytes");
+  if (applet.services?.length && !declared.includes("net.http")) push("network", "/engine/capabilities", "applet.services needs net.http");
   return out;
 }

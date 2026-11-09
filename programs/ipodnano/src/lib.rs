@@ -13,7 +13,6 @@ extern crate alloc;
 use alloc::{boxed::Box, rc::Rc, vec, vec::Vec};
 use core::cell::{Cell, RefCell, UnsafeCell};
 use microts::{
-    pocketjs_core::damage::DamageRect,
     runtime::{AotApp, AotGuest, AppState},
     Input, Ui,
 };
@@ -31,7 +30,6 @@ use generated::AppViewModel;
 
 pub const WIDTH: usize = 176;
 pub const HEIGHT: usize = 132;
-pub const TICK_HZ: u32 = profile::TICK_HZ;
 pub const MAX_REGIONS: usize = 8;
 
 pub use pocket_rockbox_input::{button, buttons};
@@ -175,6 +173,13 @@ impl Hero {
             .unwrap();
         let pixels = Rc::new(Pixels(UnsafeCell::new(vec![0; WIDTH * HEIGHT])));
         let flushed = Rc::new(RefCell::new(Vec::new()));
+        // The LCD binds renderer 0: register the software rasterizer first.
+        runtime
+            .set_software_renderer(
+                pocket_raster::RasterRenderer::new(1).unwrap(),
+                pocket_raster::RasterRenderer::new,
+            )
+            .unwrap();
         runtime
             .add_display(
                 Lcd {
@@ -185,7 +190,7 @@ impl Hero {
             )
             .unwrap();
         runtime
-            .boot_aot_deferred(profile::PROFILE_HASH, [WIDTH as u32, HEIGHT as u32], false)
+            .boot_aot_deferred(profile::PROFILE_HASH, [WIDTH as u32, HEIGHT as u32], false, TICK_HZ)
             .unwrap();
         runtime.skip_presentation().unwrap();
         Self {

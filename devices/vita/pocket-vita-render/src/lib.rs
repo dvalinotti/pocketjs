@@ -8,9 +8,9 @@ use pocket_drivers::{
     DamageRect, DeviceTarget, FrameInput, PixelFormat, Rect, RenderError, RenderResources,
     Renderer, RendererDescriptor, Synchronization, Target, TargetOwnership,
 };
-use pocket_glyph_pages::{GlyphPageLayout, GlyphSampler};
+use pocket_render::glyph_pages::{GlyphPageLayout, GlyphSampler};
+use pocket_render::tex_cache::{TextureCache, TextureKey};
 use pocket_spec as spec;
-use pocket_tex_cache::{TextureCache, TextureKey};
 pub mod registered;
 mod geometry;
 #[cfg(target_os = "vita")]
@@ -26,7 +26,7 @@ pub struct Vertex {
     pub uv: [f32; 2],
     pub color: u32,
 }
-impl pocket_tri_batch::Vertex for Vertex {
+impl pocket_render::Vertex for Vertex {
     fn from_components(position: [f32; 2], uv: [f32; 2], color: u32) -> Self {
         Self {
             position,
@@ -43,7 +43,7 @@ pub struct Clip {
     pub h: i32,
 }
 /// Texture zero means untextured vertex color. Other ids belong to Device.
-pub type Command = pocket_tri_batch::Batch<u32, Clip>;
+pub type Command = pocket_render::Batch<u32, Clip>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextureFormat {
     Rgba,
@@ -84,10 +84,12 @@ pub unsafe trait Device {
         Err(RenderError::Unsupported)
     }
     fn release_texture(&mut self, id: u32);
+    /// `target` is the size in pixels of the target the commands' clips refer to.
     fn submit(
         &mut self,
         vertices: &[Vertex],
         commands: &[Command],
+        target: (i32, i32),
         clear: Option<u32>,
     ) -> Result<Self::Frame, RenderError>;
     fn wait(&mut self) -> Result<(), RenderError>;
@@ -515,7 +517,7 @@ impl<D: Device> GxmRenderer<D> {
     ) -> Result<(), RenderError> {
         self.images.clear();
         self.fonts.clear();
-        for operation in pocket_draw_ops::DrawOps::new(&frame.list.words, logical) {
+        for operation in pocket_render::DrawOps::new(&frame.list.words, logical) {
             let op = operation.map_err(|_| RenderError::InvalidFrame)?;
             match op.opcode {
                 spec::draw_op::TEX_QUAD | spec::draw_op::TEX_TRI => {
@@ -566,7 +568,7 @@ impl<D: Device> GxmRenderer<D> {
             return Err(RenderError::InvalidFrame);
         }
         let logical = DamageRect::new(0, 0, w as i32, h as i32);
-        pocket_draw_ops::validate(&frame.list.words, logical)
+        pocket_render::validate(&frame.list.words, logical)
             .map_err(|_| RenderError::InvalidFrame)?;
         self.prepare(frame, id, logical)?;
         self.build(&frame.list.words, w, h)?;
@@ -583,6 +585,7 @@ impl<D: Device> GxmRenderer<D> {
         self.device.submit(
             &self.vertices,
             &self.commands,
+            (self.config.width as i32, self.config.height as i32),
             if self.external {
                 None
             } else {
@@ -591,9 +594,9 @@ impl<D: Device> GxmRenderer<D> {
         )
     }
 }
-fn cache_error(error: pocket_tex_cache::CacheError<RenderError>) -> RenderError {
+fn cache_error(error: pocket_render::tex_cache::CacheError<RenderError>) -> RenderError {
     match error {
-        pocket_tex_cache::CacheError::Upload(error) => error,
+        pocket_render::tex_cache::CacheError::Upload(error) => error,
         _ => RenderError::Failed,
     }
 }
@@ -716,6 +719,31 @@ impl<D: Device> Drop for GxmRenderer<D> {
 
 #[cfg(test)]
 mod tests;
+
+/// What a draw does to vita2d's clip state. vita2d writes the clip rectangle into
+/// the stencil buffer each time it is set or enabled, which costs the GPU a
+/// pass per call, so a draw changes the state only when its clip differs from
+/// the previous draw's, and a clip covering the whole target turns clipping off.
+#[cfg(any(target_os = "vita", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClipChange {
+    Keep,
+    Disable,
+    Set(Clip),
+}
+
+#[cfg(any(target_os = "vita", test))]
+fn clip_change(previous: &mut Option<Clip>, clip: Clip, width: i32, height: i32) -> ClipChange {
+    if *previous == Some(clip) {
+        return ClipChange::Keep;
+    }
+    *previous = Some(clip);
+    if clip.x <= 0 && clip.y <= 0 && clip.x + clip.w >= width && clip.y + clip.h >= height {
+        ClipChange::Disable
+    } else {
+        ClipChange::Set(clip)
+    }
+}
 
 // UINT16_MAX is divisible by three; every native draw stays within vita2d's
 // 16-bit linear index storage and starts at the next complete triangle.

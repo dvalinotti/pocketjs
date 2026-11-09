@@ -1,20 +1,25 @@
-//! One canonical runtime archive plus the 3DS package recovery inspection ABI.
-//! The host composes C guest, PICA Renderer, Display and input drivers.
+//! One canonical runtime archive plus the 3DS package recovery inspection ABI
+//! and the native program (`pocket_native_program.h`) built without outputs.
+//! The host composes its C guest, PICA Renderer, Displays and input drivers
+//! through the QuickJS facade.
 #![no_std]
 extern crate alloc;
+pub use pocket_archive::*;
+// The archive member supplies the pocket_native_program_* symbols; nothing
+// here calls it by name.
+use pocket_native_program as _;
+use pocket_drivers::abi;
 use pocket_package::sha256::sha256_hex_prefix;
-use pocket_package::{plan_facts, select_guest, GuestError, PackageError, PlanFactsError};
-pub use pocket_runtime_cabi::*;
+use pocket_runtime::abi::open_package;
 
-unsafe fn bytes<'a>(pointer: *const u8, length: usize) -> &'a [u8] {
-    unsafe { core::slice::from_raw_parts(pointer, length) }
-}
 /// Borrowed sections of one verified filesystem `.pocket`. The C runtime owns
 /// the package allocation and keeps it alive until the guest is torn down.
 #[repr(C)]
 pub struct PocketGuestPackage {
     pub javascript: *const u8,
     pub javascript_length: usize,
+    pub worker_javascript: *const u8,
+    pub worker_javascript_length: usize,
     pub pak: *const u8,
     pub pak_length: usize,
     pub plan: *const u8,
@@ -44,6 +49,8 @@ pub const POCKET_GUEST_FEATURE_OFFLOAD: u32 = 1;
 pub const POCKET_GUEST_FEATURE_MEDIA: u32 = 2;
 /// `features.system.agent` is true in the plan: the top screen is the agent stage.
 pub const POCKET_GUEST_FEATURE_AGENT: u32 = 4;
+/// `features.system.extension` is true in the plan: a product extension owns the top screen.
+pub const POCKET_GUEST_FEATURE_EXTENSION: u32 = 64;
 /// `features.data.fs` is true in the plan: the guest gets `globalThis.fs`.
 pub const POCKET_GUEST_FEATURE_FS: u32 = 8;
 /// `features.camera.qr` is true in the plan: the outer camera's viewfinder
@@ -53,68 +60,31 @@ pub const POCKET_GUEST_FEATURE_CAMERA_QR: u32 = 16;
 /// the photo store.
 pub const POCKET_GUEST_FEATURE_CAMERA_PHOTO: u32 = 32;
 
-fn package_error_code(error: GuestError) -> i32 {
-    match error {
-        GuestError::Package(PackageError::Truncated) => 1,
-        GuestError::Package(PackageError::BadMagic) => 2,
-        GuestError::Package(PackageError::BadVersion) => 3,
-        GuestError::Package(PackageError::HashMismatch) => 4,
-        GuestError::Package(PackageError::BadUtf8) => 5,
-        GuestError::Package(PackageError::BadLayout) => 17,
-        GuestError::ProfileHashMismatch => 16,
-        GuestError::MissingVariant => 6,
-        GuestError::HostAbiMismatch => 7,
-        GuestError::MissingIdentity => 8,
-        GuestError::MissingPlan => 9,
-        GuestError::MissingJavaScript => 10,
-        GuestError::JavaScriptNotTerminated => 11,
-    }
-}
-
-/// Verify a complete `.pocket` for an independent target/ABI/profile identity.
-/// Returns 0 on success; non-zero codes are stable for the C runtime's status
-/// and recovery files (12 is a bad pointer or non-UTF-8 target argument;
-/// 13-15 a plan whose JSON, viewport or auxiliary surface cannot be read;
-/// 16 a profile mismatch; 17 a malformed layout).
+/// Verify a complete `.pocket` and admit the first variant the exported
+/// profile facts satisfy (`pocket_package::admission`). Returns the generated
+/// `POCKET_PACKAGE_OPEN_*` codes of `pocket_runtime.h`, which the C runtime's
+/// status and recovery files store, from the table of
+/// `pocket_runtime::abi::open_package`: `OK` on success, the selection codes
+/// of `guest_error_code`, `BAD_ARGUMENT` for a bad pointer, `NO_IDENTITY` for
+/// an empty app id, and `PLAN_JSON`, `PLAN_VIEWPORT` or `PLAN_AUXILIARY` for a
+/// plan whose JSON, viewport or auxiliary surface cannot be read. The profile
+/// hash only orders variants.
 #[no_mangle]
 pub unsafe extern "C" fn pocket_package_open(
     ptr: *const u8,
     len: usize,
-    target_ptr: *const u8,
-    target_len: usize,
+    facts: *const abi::PocketProfileFacts,
     host_abi: u32,
-    expected_profile_hash: *const u8,
+    profile_hash: *const u8,
     out: *mut PocketGuestPackage,
 ) -> i32 {
-    if ptr.is_null()
-        || len == 0
-        || len > isize::MAX as usize
-        || target_ptr.is_null()
-        || target_len == 0
-        || target_len > isize::MAX as usize
-        || expected_profile_hash.is_null()
-        || out.is_null()
-    {
-        return 12;
+    if out.is_null() {
+        return abi::POCKET_PACKAGE_OPEN_BAD_ARGUMENT;
     }
-    let target = match core::str::from_utf8(bytes(target_ptr, target_len)) {
-        Ok(value) if !value.is_empty() => value,
-        _ => return 12,
-    };
-    let mut profile_hash = [0; 32];
-    profile_hash.copy_from_slice(bytes(expected_profile_hash, 32));
-    let guest = match select_guest(bytes(ptr, len), target, host_abi, &profile_hash, false) {
-        Ok(guest) => guest,
-        Err(error) => return package_error_code(error),
-    };
-    if guest.id.is_empty() {
-        return 8;
-    }
-    let facts = match plan_facts(guest.plan) {
-        Ok(facts) => facts,
-        Err(PlanFactsError::Malformed) => return 13,
-        Err(PlanFactsError::Viewport) => return 14,
-        Err(PlanFactsError::Auxiliary) => return 15,
+    // The app id names the state slot below runtime/apps.
+    let (guest, facts) = match open_package(ptr, len, facts, host_abi, profile_hash, true) {
+        Ok(opened) => (opened.guest, opened.facts),
+        Err(code) => return code,
     };
     let auxiliary = facts.auxiliary;
     let mut slot = [0u8; 17];
@@ -122,6 +92,8 @@ pub unsafe extern "C" fn pocket_package_open(
     out.write(PocketGuestPackage {
         javascript: guest.js.as_ptr(),
         javascript_length: guest.js.len(),
+        worker_javascript: guest.worker_js.as_ptr(),
+        worker_javascript_length: guest.worker_js.len(),
         pak: guest.pak.as_ptr(),
         pak_length: guest.pak.len(),
         plan: guest.plan.as_ptr(),
@@ -146,6 +118,10 @@ pub unsafe extern "C" fn pocket_package_open(
             POCKET_GUEST_FEATURE_AGENT
         } else {
             0
+        } | if facts.feature("system.extension") {
+            POCKET_GUEST_FEATURE_EXTENSION
+        } else {
+            0
         } | if facts.feature("data.fs") {
             POCKET_GUEST_FEATURE_FS
         } else {
@@ -161,5 +137,5 @@ pub unsafe extern "C" fn pocket_package_open(
         },
         slot,
     });
-    0
+    abi::POCKET_PACKAGE_OPEN_OK
 }

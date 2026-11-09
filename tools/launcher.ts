@@ -8,7 +8,7 @@ import { resizeBilinear } from "./image-resize.ts";
 //   bun tools/launcher.ts covers [--target ...]       + render target-neutral covers
 //   bun tools/launcher.ts build [--target ...]        + multi-app console package
 //
-// The embedded set is COMPUTED, never curated: every apps/*/pocket.json
+// The embedded set is COMPUTED, never curated: every apps/*/pocket.app.json
 // that resolves against the selected target profile (the same admission gate
 // `pocket build` runs) is in, minus explicit --exclude. Covers are rendered by
 // the deterministic PSP-flavored sim host, so they remain target-neutral and
@@ -57,7 +57,7 @@ const LAUNCHER_DIR = join(APPS_DIR, "launcher");
 const COVERS_DIR = join(LAUNCHER_DIR, "covers");
 const IMAGES_JSON = join(LAUNCHER_DIR, "images.json");
 const REGISTRY_TS = join(LAUNCHER_DIR, "registry.generated.ts");
-const LAUNCHER_MANIFEST = join(LAUNCHER_DIR, "pocket.json");
+const LAUNCHER_MANIFEST = join(LAUNCHER_DIR, "pocket.app.json");
 const LAUNCHER_APP = join(LAUNCHER_DIR, "app.tsx");
 const LAUNCHER_PSP_DIR = join(LAUNCHER_DIR, "psp");
 
@@ -210,7 +210,7 @@ class LauncherUsageError extends Error {}
 function usage(message?: string): never {
   if (message) console.error(`launcher: ${message}`);
   console.error(
-    "usage: bun tools/launcher.ts <scan|covers|pack|build> [--target psp|vita|symbian] [--exclude <output>]... [--include-manifest <external/pocket.json>]... [--force] [-- backend args]",
+    "usage: bun tools/launcher.ts <scan|covers|pack|build> [--target psp|vita|symbian] [--exclude <output>]... [--include-manifest <external/pocket.app.json>]... [--force] [-- backend args]",
   );
   throw new LauncherUsageError(message);
 }
@@ -275,7 +275,7 @@ function launcherBuildEntry(
   const generatedManifest = join(
     paths.output,
     ".manifests",
-    "launcher.symbian.pocket.json",
+    "launcher.symbian.pocket.app.json",
   );
   mkdirSync(dirname(generatedManifest), { recursive: true });
   writeFileSync(
@@ -350,7 +350,7 @@ export function prepareIsolatedLauncherSource(
     copyFileSync(sourceAsset, join(covers, asset));
   }
 
-  const manifestPath = join(source, "pocket.json");
+  const manifestPath = join(source, "pocket.app.json");
   writeFileSync(
     manifestPath,
     JSON.stringify(
@@ -418,7 +418,7 @@ function scanRegistryForTarget(
   for (const dir of readdirSync(APPS_DIR).sort()) {
     // The launcher never lists itself, nor the development container.
     if (dir === "launcher" || dir === "devkit") continue;
-    const manifestPath = join(APPS_DIR, dir, "pocket.json");
+    const manifestPath = join(APPS_DIR, dir, "pocket.app.json");
     if (!existsSync(manifestPath)) continue;
     const manifest: unknown = readPocketManifest(manifestPath).manifest;
     const resolution = resolveForTarget(manifest, target);
@@ -454,7 +454,7 @@ function scanRegistryForTarget(
   return { apps };
 }
 
-/** Admission sweep: every app pocket.json that resolves for the target. */
+/** Admission sweep: every app pocket.app.json that resolves for the target. */
 export function scanRegistry(
   exclude: ReadonlySet<string>,
   target: LauncherTarget = "psp",
@@ -850,17 +850,46 @@ export async function renderCovers(
     await Bun.write(bgPath, encodePNG(stageBackground(), SHOT_W, SHOT_H));
     console.log(`  stage ${relative(ROOT, bgPath)}`);
   }
+  // POCKET_LAUNCHER_COVERS=placeholder (tools/test.ts sets it for the launcher
+  // stage) writes the fallback gradient for every missing cover and compiles
+  // nothing: a cover is 256x128 RGBA either way, and the launcher tests read
+  // the tree's text, not pixels. A placeholder leaves a marker beside its PNG;
+  // a render without the variable treats a marked cover as missing.
+  const placeholder = process.env.POCKET_LAUNCHER_COVERS === "placeholder";
+  const marker = (app: LauncherRegistryEntry) => join(COVERS_DIR, `cover-${app.output}.placeholder`);
+  const pending = registry.apps.filter((app) => {
+    const coverPath = join(COVERS_DIR, `cover-${app.output}.png`);
+    const reflPath = join(COVERS_DIR, `refl-${app.output}.png`);
+    const present = existsSync(coverPath) && existsSync(reflPath) && (placeholder || !existsSync(marker(app)));
+    return force || !present;
+  });
+  const coverTargetOf = (app: LauncherRegistryEntry) => {
+    const manifest = readPocketManifest(manifestPath(app)).manifest;
+    const coverTarget: LauncherTarget = (["psp", "vita", SYMBIAN_E7_DEV_TARGET_ID] as const).find(target => resolveForTarget(manifest, target).ok)!;
+    if (!coverTarget) throw new Error(`cover app no longer admits a launcher target: ${app.output}`);
+    return { manifest, coverTarget };
+  };
+  if (placeholder) {
+    for (const app of pending) {
+      // An explicitly included manifest still compiles: the command's exit
+      // code is how its author learns that the app does not build.
+      if (app.projectRoot) await compileApp(app, coverTargetOf(app).coverTarget, join(ROOT, "dist"));
+      const ringed = transparentRing(fallbackCover(app.output), SHOT_W, SHOT_H);
+      await Bun.write(join(COVERS_DIR, `cover-${app.output}.png`), encodePNG(ringed, SHOT_W, SHOT_H));
+      await Bun.write(join(COVERS_DIR, `refl-${app.output}.png`), encodePNG(reflectionOf(ringed), REFL_W, REFL_H));
+      await Bun.write(marker(app), "");
+      console.log(`  cover ${app.output} -> placeholder gradient (POCKET_LAUNCHER_COVERS)`);
+    }
+    return;
+  }
+  if (pending.length === 0) return;
   // Import lazily: bootWorld pulls the wasm core + build machinery, which
   // `scan` alone must not need.
   const { bootBundle } = await import("../programs/sim/sim.ts");
   const wasm = await ensureHostWasm();
-  for (const app of registry.apps) {
+  for (const app of pending) {
     const coverPath = join(COVERS_DIR, `cover-${app.output}.png`);
-    const reflPath = join(COVERS_DIR, `refl-${app.output}.png`);
-    if (!force && existsSync(coverPath) && existsSync(reflPath)) continue;
-    const manifest = readPocketManifest(manifestPath(app)).manifest;
-    const coverTarget: LauncherTarget = (["psp", "vita", SYMBIAN_E7_DEV_TARGET_ID] as const).find(target => resolveForTarget(manifest, target).ok)!;
-    if (!coverTarget) throw new Error(`cover app no longer admits a launcher target: ${app.output}`);
+    const { manifest, coverTarget } = coverTargetOf(app);
     if (force || !existsSync(join(ROOT, "dist", `${app.output}.js`))) {
       await compileApp(app, coverTarget, join(ROOT, "dist"));
     }
@@ -889,6 +918,7 @@ export async function renderCovers(
       join(COVERS_DIR, `refl-${app.output}.png`),
       encodePNG(reflectionOf(ringed), REFL_W, REFL_H),
     );
+    rmSync(marker(app), { force: true });
   }
 }
 
@@ -969,6 +999,7 @@ async function packPackages(
             title: plan.app.title,
           },
           js,
+          ...(plan.domains?.worker ? { workerJs: new Uint8Array(readFileSync(join(paths.output, `${plan.app.output}.worker.js`))) } : {}),
           pak,
           cover: existsSync(coverPath)
             ? new Uint8Array(readFileSync(coverPath))
@@ -1181,11 +1212,11 @@ async function main(): Promise<void> {
       exclude.add(value);
     } else if (arg === "--include-manifest") {
       const value = argv.shift();
-      if (!value) usage("--include-manifest requires a pocket.json path");
+      if (!value) usage("--include-manifest requires a pocket.app.json path");
       externalManifests.push(value);
     } else if (arg.startsWith("--include-manifest=")) {
       const value = arg.slice("--include-manifest=".length);
-      if (!value) usage("--include-manifest requires a pocket.json path");
+      if (!value) usage("--include-manifest requires a pocket.app.json path");
       externalManifests.push(value);
     } else if (arg === "--target") {
       const value = argv.shift();
@@ -1232,7 +1263,7 @@ async function main(): Promise<void> {
   ): Promise<void> => {
     let launcher = launcherBuildEntry(target, paths);
     console.log(
-      `launcher: scanning apps/*/pocket.json against target ${target}`,
+      `launcher: scanning apps/*/pocket.app.json against target ${target}`,
     );
     const registry = includeExternalManifests(
       scanRegistry(exclude, target),

@@ -16,19 +16,20 @@ host.**
 
 **Programs under `programs/` compose runtimes and drivers.** `platforms/`
 contains OS and SDK adapters; `devices/` contains GPU mechanisms and renderers.
-`profiles/` defines the built-in software contracts. A consuming product can
-supply its own profile module and runtime configuration without a registry
-entry. Phone, music-player, reader and console programs use these same
-directories in the main repository. **Code dependencies determine placement;
-device age does not determine repository ownership.** See
+`hosts/` holds the built-in host contracts, one `hosts/<id>/pocket.host.json`
+per host id. A consuming product can supply its own host contract and host
+config without a registry entry. Phone, music-player, reader and console
+programs use these same directories in the main repository. **Code
+dependencies determine placement; device age does not determine repository
+ownership.** See
 [Platform contracts](/docs/platform-contracts/).
 
 The application's framework can be Solid, Vue Vapor, or Octane. Solid uses its
 universal renderer; Vue Vapor uses a Vapor renderer adapter and a DOM-shaped
 facade for Vue's helpers; Octane compiles JSX and hooks to static host plans
 plus dynamic slots whose driver (`renderer-octane.ts`) targets the native tree
-with no DOM shim. The layout, styling, animation, 2D physics, and text engine
-live in `pocketjs-core`; software drawing and presentation live in separate
+with no DOM shim. The layout, styling, animation, and text engine live in
+`pocketjs-core`; 2D physics, software drawing and presentation live in separate
 `no_std` Rust crates compiled for each host's target triple. Styling is a
 build-time [Tailwind subset](/docs/styling/); fonts are
 baked into atlases at build time.
@@ -47,7 +48,8 @@ The driver traits and generated C declarations define display, renderer,
 input and package-source boundaries. **C records use `struct_size` prefix
 compatibility; DrawList operations use a closed version.** Deferred-device
 lifecycle tests check ordering, buffer ownership and retirement. Application
-packages use format 2, the profile's SHA-256 identity and binding generation 12.
+packages use format 2, the host contract's SHA-256 identity (`profileHash`) and
+binding generation 12.
 See [Native contract](/docs/native-contract/#package-and-driver-compatibility).
 
 ## Application instances and guests
@@ -72,10 +74,13 @@ wire, promise-job draining, host identity, tick rate, viewport, and native asset
 tables. **Absent asset tables mean JavaScript must load assets from `__pak`.**
 An empty native table means native loading completed without that asset kind.
 
-**`pocket-runtime-cabi` owns the instance C entry points.** Its compatibility
-adapters retain the old UI and IDF call shapes over runtime-owned state.
-`programs/native/cabi` supplies the historical C-shell archive;
-`programs/esp-idf/archive` composes one Rust archive for IDF. The GLES renderers
+**`pocket_runtime::abi` owns the instance C entry points.** It holds the
+instance handle and the bodies of the `pocket_runtime_*` functions;
+`pocket_drivers::abi` adapts C driver tables to the driver traits.
+`programs/sdk/archive` defines each exported symbol once with the allocator,
+panic handler and host hooks of a C archive. `programs/native/runtime` supplies
+the native program composition; `programs/esp-idf/archive` composes one Rust
+archive for IDF over the SDK archive. The GLES renderers
 live in `devices/gles/`. Program scene adapters connect existing embedding
 APIs to these renderers. C guest composition lives in
 `programs/native/quickjs`; generated guest bindings live in `engine/guest-quickjs`.
@@ -100,30 +105,65 @@ on the UI core.** Their callers supply resource views or borrowed bytes.
 
 | Crate | Source | Responsibility |
 | --- | --- | --- |
-| `pocket-raster` | `engine/raster` | DrawList interpretation and software pixel output |
-| `pocket-present` | `engine/present` | Damage history, prepare/commit/abort transactions, incremental drawing, and surface composition |
+| `pocket-render` | `engine/render` | DrawList decoding, vertex batching, texture and glyph page retention, damage history, and prepare/commit/abort transactions |
+| `pocket-raster` | `engine/raster` | DrawList interpretation, software pixel output, incremental drawing, and surface composition |
 | `pocket-package` | `engine/package` | Package admission, variant selection, pak entries, build facts, and SHA-256 |
 | `pocket-media` | `engine/modules/media` | Stream containers, transport messages, RAM stream assembly, and byte codecs |
+| `pocket-physics` | `engine/physics` | 2D worlds, bodies, contacts, colliders, zones, and particle emitters behind `ui.physics` |
 
-`pocket-present` calls `pocket-raster` for software drawing. Both consume
-`RenderResources` from `pocket-drivers`; neither requires a `Ui` instance.
-**The core keeps compatibility exports at the existing module paths.**
-Hosts can continue importing `pocketjs_core::raster`, `damage`, `compositor`,
-`package`, `pak`, `sha256`, `plan_facts`, `stream`, `stream_rx`, `wire`, and
-`codec` while their implementations reside in the new crates. Package bytes,
-admission checks, and DrawList encoding retain their existing formats.
+`pocket-raster` decodes operations and plans damage through `pocket-render`.
+Both consume `RenderResources` from `pocket-drivers`; neither requires a `Ui`
+instance. The coordinator that registers renderers and displays and orders
+render completion, display transfer, and resource retirement is
+`pocket_runtime::coordinator`. **Renderer 0 is reserved for the software
+rasterizer and is empty until the composition registers it.** A C archive built
+with the `software-renderer` feature registers `pocket_raster::RasterRenderer`
+there in `pocket_runtime_create`; a Rust program calls
+`Runtime::set_software_renderer` before it registers a display with renderer 0.
+The registration carries a callback that rebuilds the renderer when boot or a
+resize selects another integer scale. `pocket-runtime` does not depend on
+`pocket-raster`.
+
+**`pocketjs-core` depends on neither `pocket-raster` nor the coordinator.**
+Hosts import `pocket_raster` and `pocket_render::damage`. Package support
+(`sha256`, `pak`, `plan_facts`, `package`, `package_format`) is in
+`pocket_package` and media support (`codec`, `stream`, `stream_rx`, `wire`) in
+`pocket_media`; the core re-exports neither. The `pocket-present` crate
+re-exports its former paths from `pocket-render`, `pocket-raster`,
+`pocket-runtime`, and `pocket-drivers` for one release; no crate in this
+repository depends on it. Package bytes, admission checks, and DrawList
+encoding retain their existing formats.
+
+**`pocketjs-core` defines the `Physics` trait and holds no engine.** `Ui::tick`
+calls the installed engine's `step` once per tick after animation tracks, with
+layout current, and skips it while `is_idle` is true; the engine writes only
+the `physics_values` layer of the nodes it poses and clears that layer when it
+releases a view. `pocket-physics` implements the trait with the core's `fmath`
+functions, so poses keep the same bits on every host. A program installs it
+with `Runtime::set_physics` before boot. Without an engine, admission rejects a
+package or AOT artifact that requests `ui.physics`, `OpContext::set_physics_enabled(true)`
+returns `UnsupportedOperation`, and ops 52..56 are unsupported.
+`programs/sdk/archive` installs the engine in `pocket_runtime_create` when its
+`physics` feature is on: the SDK export enables it, the IDF and SiFli archives
+do not link `pocket-physics`.
+`pocket-native-program`, the wasm program and `pocket-ui-surface` install it in
+their constructors.
 
 ## Rendering utilities
 
-**The rendering utilities use `no_std` and have no dependency on the UI core
-or each other.** Drivers select the utilities they need.
+**`pocket-render` uses `no_std` and depends only on `pocket-drivers` and
+`pocket-spec`.** Drivers use the modules they need.
 
-| Crate | Mechanism |
+| Module | Mechanism |
 | --- | --- |
-| `pocket-draw-ops` | Borrows operation words, validates record lengths, and attaches the current absolute clip |
-| `pocket-tri-batch` | Constructs driver-defined vertices and merges adjacent ranges with equal texture and clip keys |
-| `pocket-glyph-pages` | Expands A8 pages and masks, and retains ABGR4444 pages by submission |
-| `pocket-tex-cache` | Keeps device texture versions alive until their last referencing submission retires |
+| crate root, `record`, `batch`, `build` | Borrows operation words, validates record lengths, attaches the current absolute clip, decodes record fields, constructs driver-defined vertices, merges adjacent ranges with equal texture and clip keys, and walks a DrawList into vertices and batches under a driver's `Backend` policies |
+| `glyph_pages` | Expands A8 pages and masks, and retains ABGR4444 pages by submission |
+| `tex_cache` | Keeps device texture versions alive until their last referencing submission retires |
+| `damage` | Compares a DrawList with the one whose pixels a persistent target holds and plans disjoint regions to repaint |
+
+`pocket-draw-ops`, `pocket-glyph-pages`, and `pocket-tex-cache` re-export the
+crate root, `glyph_pages`, and `tex_cache` at their former paths for one
+release; no crate in this repository depends on them.
 
 `pocket-raster::RasterRenderer` implements the driver trait for RGBA8888,
 ARGB8888, and RGB565 CPU targets. **It writes only the acquired region and
@@ -135,9 +175,15 @@ over the existing pixels, after the caller has completed earlier accelerator
 work and made the target cache visible. Native text and surface composition
 remain separate host responsibilities.
 
-The GLES backend uses the shared triangle construction and batching code.
+**The GLES, GXM, and wgpu renderers share one DrawList walk from
+`pocket-render`; each supplies its vertex type, texture and clip keys, fill
+source, image and glyph lookup, record acceptance, and quad diagonal.** The
+PSP, PPA, EPIC, and software renderers keep their own walks and take XY and
+WH unpacking from the same crate; the PSP and EPIC gradient paths also take
+its corner color mapping, and the software compositor decodes surface records
+through it.
 The core's glyph texture preparation and the RGB565 glyph mask path use
-`pocket-glyph-pages`. Existing host entry points remain available during the
+`pocket_render::glyph_pages`. Existing host entry points remain available during the
 runtime migration.
 
 ## The pipeline
@@ -175,7 +221,7 @@ Reading it top to bottom:
    and lifecycle APIs come from `@pocketjs/framework/*`, framework primitives
    come from `solid-js`, `vue`, or `octane`, and `class` strings use the
    Tailwind subset.
-2. A product **build** resolves `pocket.json` for one target, then runs the
+2. A product **build** resolves `pocket.app.json` for one target, then runs the
    selected JSX transform, compiles class strings to a binary style table
    (`styles.bin`), bakes target-density glyph atlases/assets, and packs them
    into `app.pak`. The JS is bundled with target/ABI constants. The low-level
@@ -185,10 +231,10 @@ Reading it top to bottom:
    engine the host provides — QuickJS on the device hosts, the host engine in
    the browser or Bun — and emits mutation ops (`ui.*`) into `pocketjs-core`.
 4. **`pocketjs-core`** owns the retained UI tree: it runs flexbox layout,
-   ticks animations, steps 2D physics worlds, measures and lays out text, and produces a flat
+   ticks animations, steps the installed 2D physics engine, measures and lays out text, and produces a flat
    **DrawList** each frame.
 5. A **renderer** consumes the DrawList and borrowed resources: sceGu/GE on PSP,
-   GXM on Vita, wgpu in the desktop host, and
+   GXM on Vita, wgpu in widgets and Pocket3D overlays, and
    the deterministic software rasterizer in `engine/raster/src/lib.rs` behind
    the browser canvas and the byte-exact PNG goldens.
 
@@ -248,9 +294,9 @@ rejected by the compiler — `createResource`, `useTransition`, and
 `startTransition` (`BANNED_SOLID_IMPORTS` in
 `framework/compiler/jsx-plugin.ts`) — so a build fails rather than a device.
 Browser and Bun development builds stay inside the same syntax and scheduler
-subset. Target compatibility is checked separately from the manifest's required
-APIs and viewport contract, so a touch-required Vita app is rejected for PSP
-before compilation.
+subset. Target compatibility is checked separately from the app contract's
+required APIs and viewport contract, so a touch-required Vita app is rejected
+for PSP before compilation.
 
 ### taffy 0.11 for layout
 
@@ -265,14 +311,14 @@ subset — is why layout is identical on every host.
 
 `engine/core/` is a platform-agnostic `#![no_std]` + `alloc` library,
 **`pocketjs-core`**. It contains no I/O, no graphics API, and no timing: the
-tree, layout, styling, animation, 2D physics, text, and DrawList generation. Each
+tree, layout, styling, animation, text, and DrawList generation; the 2D physics
+engine in `engine/physics/` plugs into its tick. Each
 program under `programs/` compiles the same crate for its
 target triple and supplies I/O, a JS engine, and a backend. `programs/psp` embeds
 QuickJS and renders through `sceGu`; `programs/web/wasm` wraps the identical core
 with the software rasterizer in one `wasm32-unknown-unknown` cdylib that serves
-both the browser dev host and the headless Bun goldens; `programs/desktop` drives
-gpui behind the `macos-app` and `linux-app` targets. Native hosts consume the
-same stable `HostBuildInputs` projection.
+both the browser dev host and the headless Bun goldens. Native hosts consume
+the same `HostBuildInputs` projection.
 
 ### Native animation on a fixed core clock
 
@@ -331,22 +377,18 @@ no-op.
 (`Vec<Node>` + free list) with a **generation counter**, so a stale handle is a
 safe no-op rather than a dangling reference. Core parses the style table,
 resolves `base` / `focus` / `active` variants, syncs nodes into taffy, measures
-text, ticks animation tracks, steps physics worlds, and walks the tree into a DrawList. A CPU **clip
+text, ticks animation tracks, steps the installed physics engine, and walks the tree into a DrawList. A CPU **clip
 stage** in `draw.rs` guarantees no negative or oversized coordinates ever reach
 a backend — axis-aligned quads are clipped with UV/color re-interpolation,
 rotated quads are Sutherland–Hodgman-clipped or culled.
 
 **3. The backend.** Consumes the DrawList and nothing else. PSP uses `sceGu`,
-Vita uses vita2d/GXM, `programs/desktop` uses the gpui backend
-(`engine/backends/gpui`), the debug uihosts use wgpu, and `wasm32` uses a
-scanline rasterizer that handles blending, gradients, and glyph coverage
-deterministically. Backends do not redefine input or styling semantics, and
-they differ from each other in one capability alone: **who measures and
-shapes text**. An app that enhances with `text.layout.native` gets a core text
-measurer installed before the guest mounts, so taffy leaf sizes, `measureText`
-and painted glyphs all come from the host text system — layout changes with the
-backend in that one case, and only for apps that asked for it. The rest are
-byte-identical, which is what the PNG goldens pin. See
+Vita uses vita2d/GXM, widgets and Pocket3D overlays use wgpu, and `wasm32` uses
+a scanline rasterizer for blending, gradients and glyph coverage.
+**Software rendering produces the same bytes for the same DrawList, resources
+and density.** GPU backends preserve geometry and painter order; blending,
+filtering and triangle-edge rounding can differ. Backends retain the shared
+input and styling contracts. See
 [Render backends](https://github.com/pocket-nexus/pocketjs/blob/main/docs/BACKENDS.md).
 
 The exact op signatures, node lifecycle, and per-frame ordering live on the
@@ -358,9 +400,10 @@ The UI is one module in that shape and the other domains reuse it unchanged. A
 module is an SDK subpath, a spec, and a native core. Its capability id is the
 same string as the spec namespace and the pak prefix: `audio.pcm` means
 `globalThis.audio` is mounted and `audio:wav.` pak entries have meaning, so one
-name covers the manifest, the runtime namespace, and the asset key.
+name covers the app contract, the runtime namespace, and the asset key.
 `contracts/spec/` holds the shipped specs — `audio`, `db`, `fs`, `net`,
-`physics`, `platforms`, `spec`, plus the manifest, package, system and runtime-wire files.
+`physics`, `platforms`, `spec`, plus the app contract (`pocket-manifest.ts`),
+host contract (`profile.ts`), package, system and runtime-wire files.
 They are plain TypeScript data: `gen-rust.ts` generates
 `engine/spec/src/lib.rs`, `gen-c.ts` generates
 `contracts/generated/pocket_spec.h`, and `tests/generated-contracts.test.ts`

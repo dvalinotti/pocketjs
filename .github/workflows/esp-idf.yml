@@ -22,7 +22,7 @@ jobs:
           tests/idf-incremental.test.ts tests/idf-release.test.ts tests/idf-package-corpus.test.ts tests/idf-input.test.ts
       - name: Install repository stable Rust
         run: rustup show
-      - run: cargo test --locked --manifest-path Cargo.toml -p pocket-runtime-cabi -p pocket-present -p pocket-render-esp-ppa --features pocket-render-esp-ppa/cabi
+      - run: cargo test --locked --manifest-path Cargo.toml -p pocket-archive -p pocket-render -p pocket-raster -p pocket-render-esp-ppa --features pocket-render-esp-ppa/cabi
       - run: cargo test --locked --manifest-path Cargo.toml -p pocket-package -p pocket-media
       - name: Test C bindings with the pinned QuickJS component
         env:
@@ -96,14 +96,14 @@ jobs:
       - name: Compile deterministic smoke package and export its program profile
         run: |
           bun tools/pocket.ts compile \
-            --manifest tests/esp-idf/examples/smoke/pocket.json \
-            --runtime-config tests/esp-idf/examples/smoke/pocket.runtime-config.ts \
+            --manifest tests/esp-idf/examples/smoke/pocket.app.json \
+            --host-config tests/esp-idf/examples/smoke/pocket.host.config.ts \
             --project-root tests/esp-idf/examples/smoke \
             --plan-dir "$GITHUB_WORKSPACE/.pocket-build/validation/idf-ci/plans" \
             --outdir "$GITHUB_WORKSPACE/.pocket-build/validation/idf-ci/app" \
             --output "$GITHUB_WORKSPACE/tests/esp-idf/examples/smoke/idf-smoke.pocket"
-          bun tools/pocket.ts profile export \
-            --config tests/esp-idf/examples/smoke/pocket.runtime-config.ts \
+          bun tools/pocket.ts host export \
+            --config tests/esp-idf/examples/smoke/pocket.host.config.ts \
             --out "$GITHUB_WORKSPACE/.pocket-build/validation/idf-ci/profile"
 
       - name: Verify committed prebuilt package

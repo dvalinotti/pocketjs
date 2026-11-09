@@ -14,7 +14,7 @@ GPIO configuration, panel setup and package storage.
 | `pocket_runner` | Optional owner task using the shared tick schedule | P4, S3 |
 
 The runtime component links `libpocket_idf_runtime.a`. This archive composes
-`pocket-runtime-cabi` and the PPA factory. `pocket-raster` supplies the built-in
+`pocket-archive` and the PPA factory. `pocket-raster` supplies the built-in
 software renderer. The PPA renderer implements the same public driver contract;
 unsupported operations use ordered software fallback.
 
@@ -26,7 +26,7 @@ initialize a physical panel. A product can replace that table with
 before destroying runtime or driver state.
 
 ```sh
-pocket profile export --config tests/esp-idf/examples/prebuilt/pocket.runtime-config.ts \
+pocket host export --config tests/esp-idf/examples/prebuilt/pocket.host.config.ts \
     --out /tmp/pocket-idf-profile
 cd tests/esp-idf/examples/prebuilt
 idf.py -DPOCKETJS_PROFILE_EXPORT_DIR=/tmp/pocket-idf-profile \
@@ -37,12 +37,11 @@ idf.py build
 A source build uses the caller's Rust toolchain. Registry releases provide
 native archives for P4 and S3. Pass `POCKET_RUNTIME_ARCHIVE` to select a prepared
 archive, or `POCKETJS_CARGO` with source builds to select a Cargo installation.
-The product owns `pocket.runtime-config.ts` and its imported software profile.
-`pocket profile export` emits the header and JSON sidecar consumed by the
-program and Python embed helper. The prebuilt IDF build needs no Bun or Pocket
+The product owns `pocket.host.config.ts` and the host contract it names.
+`pocket host export` emits the header and the stamped `pocket.host.json`
+consumed by the program and Python embed helper. The prebuilt IDF build needs no Bun or Pocket
 CLI once those artifacts exist. Source compilation uses `pocketjs_compile_app`;
-`pocketjs_profile_header` exports a profile without an application.
+`pocketjs_profile_header` exports the host contract without an application.
 
 See [component maintenance](../../docs/ESP_IDF.md) for archive receipts,
-QuickJS source identity and validation. `tests/data-smoke` retains its independent
-data-module toolchain and does not participate in the UI runtime graph.
+QuickJS source identity and validation.

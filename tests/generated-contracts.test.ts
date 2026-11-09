@@ -9,8 +9,11 @@ import { generatedDriverContracts } from "../tools/driver-contracts.ts";
 import { generatedUiBindings } from "../tools/ui-bindings.ts";
 import { generatedGuestWebBindings } from "../tools/guest-web-bindings.ts";
 import { generatedIdfContracts } from "../tools/packaging/esp-idf/contracts.ts";
+import { generatedQuickJsBytecodeContracts } from "../tools/quickjs-bytecode-contracts.ts";
 import { threeDsProfileHeader } from "../tools/3ds-contracts.ts";
 import { withGeneratedExports } from "../tools/gen-exports.ts";
+import { workerProtocolHeader } from "../tools/worker-contracts.ts";
+import { SCHEMAS } from "../tools/schemas.ts";
 
 const root = resolve(import.meta.dir, "..");
 const committed = (path: string) => readFileSync(resolve(root, path), "utf8");
@@ -23,7 +26,10 @@ describe("generated contracts are fresh", () => {
     ...generatedUiBindings(),
     ["engine/guest-web/src/ui-descriptors.js", generatedGuestWebBindings()],
     ...generatedIdfContracts(),
+    ...generatedQuickJsBytecodeContracts(),
     ["products/3ds/include/pocket_profile.h", threeDsProfileHeader()],
+    ["engine/worker/include/pocket/worker_protocol.h", workerProtocolHeader()],
+    ...[...SCHEMAS].map(([path, generate]) => [path, generate()] as [string, string]),
   ]);
   for (const [path, expected] of outputs) {
     test(`${path} matches its generator (run \`bun run gen\`)`, () => {

@@ -2,17 +2,20 @@
 
 Pocket Link is the console's system link to one computer its owner paired with.
 The console's runtime holds **one authenticated TCP connection** to a companion
-process on that computer. Three services ride it: the NET module's HTTP on hosts
-whose net transport is the link, the companion's app catalog, and app installs.
+process on that computer. Three services ride it: a worker's HTTP requests as
+credited byte streams, the companion's app catalog, and app installs.
 The wire contract is `contracts/spec/link.ts`; this page describes the
-mechanism and the companion implementation in `tools/companion/`.
+mechanism. Pocket Hub (`pocket-nexus/pocket-hub`) is the companion. The
+reference implementation in `tools/pocket-link/` holds the wire codec, a
+console client and the companion's `net.stream` requests, and the tests check
+the console's C client against it.
 
 ## Roles
 
 | Side | Process | Sockets |
 | --- | --- | --- |
-| Console | the host runtime (3DS: `products/3ds`) | UDP **8627** for beacons, one outgoing TCP connection |
-| Companion | `tools/companion.ts serve`, or the daemon inside Pocket Companion.app | TCP **8628** listener, UDP beacon sender, control API on 127.0.0.1 |
+| Console | the host runtime (3DS: `products/3ds`; M5Stack Tab5: pocket-m5's `pocket_system`) | UDP **8627** for beacons, one outgoing TCP connection |
+| Companion | the Pocket Hub daemon, on its own or inside Pocket Hub.app | TCP **8628** listener, UDP beacon sender, control API on 127.0.0.1 |
 
 **The companion listens; the console connects.** The console holds no listening
 socket for the link. A companion that cannot bind 8628 listens on an ephemeral
@@ -30,9 +33,8 @@ ignores beacons from companion ids it holds no key for.
 
 ## Pairing
 
-1. The owner opens a pairing window (menu bar: **Pair a Console…**, or
-   `bun tools/companion.ts pair`). The companion mints a **16-byte single-use
-   secret** valid for **10 minutes**.
+1. The owner opens a pairing window in Pocket Hub. The companion mints a
+   **16-byte single-use secret** valid for **10 minutes**.
 2. The companion shows the pairing URI as a QR code (byte mode, error
    correction level M):
 
@@ -44,7 +46,8 @@ ignores beacons from companion ids it holds no key for.
    interfaces first; tunnels and VM bridges are left out. The URI is shorter
    than **160 bytes**: the companion shortens the name to fit, and the console
    receives the full name in the `paired` reply.
-3. The console scans the code with its outer camera, connects to each host in
+3. In Pocket Shell's **Settings › Mac › Pair a Mac…** the console scans the
+   code with its camera (the 3DS's outer camera), connects to each host in
    order, and runs the handshake in mode `pair` with the secret.
 4. The companion mints a **32-byte link key**, stores it, and sends it masked
    with an HMAC of the secret and both nonces. The window closes: the secret
@@ -94,8 +97,10 @@ console-chosen `id`; bodies are data frames (`u32` stream id = request id, then
 at most **32 KiB**). A closed connection fails every open request; nothing is
 replayed.
 
-**net.** The companion performs the NET module's whole-response request
-(`contracts/spec/net.ts`) with its own HTTP and TLS stack:
+**net.stream.** The companion performs a worker's HTTP request
+(`contracts/spec/net.ts`, the worker's `io.http` resource) with its own HTTP
+and TLS stack, and streams the response body in blocks of at most 1 KiB under
+the console's byte credit:
 
 - methods `GET HEAD POST PUT PATCH DELETE OPTIONS`; request body at most
   **64 KiB**; timeout at most **120 s**; response at most `maxBytes` (at most
@@ -121,11 +126,12 @@ environment.
 
 **catalog.** The companion offers every `.pocket` file in its apps directories
 that has a variant for the console's `target` from `hello` (`3ds-dev` by
-default). A row carries the identity section's id, title and output, the
-manifest's `version` and `summary` (or `description`), the file size and the
-file's **footer hash** (FNV-1a64, 16 hex digits). The footer is verified when
-the file is scanned; a file that fails it is skipped. At most **64** rows; one
-row per app id, the first directory winning. The companion watches the
+default; the Tab5 sends `tab5-home`). A row carries the identity section's
+id, title and output, the app contract's `version` and `summary` (or
+`description`), the file size and the file's **footer hash** (FNV-1a64, 16
+hex digits). The footer is verified when the file is scanned; a file that
+fails it is skipped. At most **64** rows; one row per app id, the first
+directory winning. The companion watches the
 directories and pushes `{"t":"catalog.changed"}` to every linked console after
 the offer changes.
 
@@ -142,77 +148,111 @@ its streams carry microphone audio and touch-screen shots from the console,
 glyph atlases and own-screen frames from the companion (stream ids from the
 companion have bit 31 set). [POCKET-AGENT.md](POCKET-AGENT.md) describes them.
 
-## Running the companion
+## USB carrier
+
+A PSP has no network link to its companion. It reaches the companion through
+the PSPLINK file share: `usbhostfs_pc` serves a directory on the tethered
+computer (a CardputerZero or a Mac) as `host0:`, and the companion runs the
+**USB carrier** in that directory (`serve --usb <share>`). The records are in
+`contracts/spec/link.ts` under "USB carrier".
+
+| File in `<share>/pocket-link/` | Writer | Content |
+| --- | --- | --- |
+| `ready` | companion, every **500 ms** | companion id, name, features (`media`), clock |
+| `hello` | console, every **1 s** while linked | device id, name, model, target |
+| `media.req` | console | the ticket of a media stream to open, or a close |
+| `media.ring` | companion, in place | a 64-byte head (generation, bytes written, closed flag), then a **1 MiB** ring of the stream's bytes |
+| `media.ack` | console, in place | the stream bytes the console has read |
+
+Each record is a 64-byte header (magic `PKLU`, the companion's epoch, the
+console's boot id, a sequence number, the kind, a beat counter, the JSON
+length and its FNV-1a 32 hash) followed by the JSON. The companion writes
+under a temporary name and renames; the console's writes are plain, so the
+companion reads a record whose hash fails again on its next poll: **every
+100 ms** behind a directory watch that sees the console's writes, **every
+10 ms** without one.
+
+**The cable is the trust boundary.** The computer serving the share already
+chooses every file the console reads, including the program it runs, so the
+carrier has no pairing and no key. It carries link status and media. It
+carries no network requests: HTTP is a worker resource (`io.http`), and the
+PSP host runs no worker domain. It carries no catalog and no installs,
+because a PSP's apps are embedded in the EBOOT the share serves.
+
+**Media rides a ring, not records.** A service's `MediaSource` names a ticket
+on the companion's media stream server; the console writes its token to
+`media.req`, and the carrier takes the ticket in process, runs its producer
+and writes the bytes the TCP endpoint would send (the 32-byte header, then the
+packets) into `media.ring`. The console holds the ring open, so the companion
+writes it in place, the stream bytes before the head that counts them, and
+never more than **1 MiB** past what `media.ack` reports read. A new
+`media.req`, a revoked ticket, a new boot or a silent console stops the
+producer. The decode is in [MEDIA.md](./MEDIA.md).
+
+On the console, `platforms/psp/io/src/link.rs` runs the carrier,
+`programs/psp/src/media.rs` reads the media ring, and
+`programs/psp/src/service_bindings.rs` installs `globalThis.link` and
+`globalThis.media` over them. A worker thread at a lower priority than the
+guest reads `ready` and writes `hello`, so a USB round trip never lands
+inside a frame; the guest's thread reads the companion's status from memory
+and performs no `host0:` read. The first guest evaluates after the worker's
+first `ready` read or **200 ms**, whichever comes first, so a media stream
+opened at mount finds the session up and a hung share delays the boot by
+200 ms at most. A `ready` left behind by a companion that went silent (a
+crash, an OOM kill) links again only once its beat moves. With no companion
+the worker reads `ready` once a second. A new epoch (the companion
+restarted) or **10 s** without a beat (the TCP link's silence) ends the
+session: the companion stops the stream, and the console's ring reader sees a
+head from another epoch. `link.status()` reports `linked` with the
+companion's name while it beats and `searching` otherwise; `pair`, `forget`,
+`catalog`, `install` and `remove` refuse.
 
 ```
-bun run companion serve                     # dist/3ds + ~/Library/Application Support/Pocket Companion/apps
-bun run companion serve --apps ./my-apps --allow-private --name "Studio Mac"
-bun run companion pair --wait               # QR code in the terminal; waits for the console
-bun run companion status
-bun run companion forget <console id>
-bun run companion apps-dir <path>
+# on the computer the PSP is plugged into, in a Pocket Hub checkout
+usbhostfs_pc /opt/pocket/host0 &
+bun run hub serve --usb /opt/pocket/host0 --no-agent
 ```
 
-`serve` options: `--apps <dir>` (repeatable; replaces the checkout's
-`dist/3ds`), `--name`, `--port` (default 8628), `--allow-private`,
-`--store <dir>`, `--unicast <ip>` (repeatable extra beacon target),
-`--parent-pid <pid>` (exit when that process exits). Logs are one line per
-event.
+## The companion and the reference implementation
 
-State lives in `~/Library/Application Support/Pocket Companion/`
-(`$POCKET_COMPANION_HOME` or `--store` overrides it):
+Pocket Hub implements the companion: the daemon (listener, beacons, pairing
+windows, catalog, installs, `net.stream`, the USB carrier, the companion
+services and the console agent), its control API on 127.0.0.1, the Mac app
+and the CardputerZero's screen. Its documentation covers running it, the
+control API, its storage and its tests.
 
-- `companion.json` (mode **0600**): the companion id, the owner's apps folder,
-  and each paired console `{id, name, model, key, lastAddress, lastSeen}`;
-- `control.json` (mode **0600**, present while a daemon runs): `{port, token, pid}`
-  of the control API.
+`tools/pocket-link/` holds the reference implementation. Pocket Hub imports
+these files from its PocketJS submodule.
 
-### Control API
-
-HTTP on `127.0.0.1`, a random port, `Authorization: Bearer <token>`:
-
-| Request | Result |
+| File | Content |
 | --- | --- |
-| `GET /status` | companion `{id, name, port, version, addresses, allowPrivate}`, `consoles` (linked: `{id, name, model, target, address, since}`), `paired` (without keys), `apps`, `appsDirs`, `appsDir`, `pairing {open, uri?, expiresAt?}` |
-| `POST /pair` | opens a window: `{uri, expiresAt}` |
-| `DELETE /pair` | closes the window |
-| `DELETE /consoles/:id` | forgets the console: `{removed}` |
-| `POST /apps-dir {path}` | sets the owner's apps folder: `{appsDir, apps}` |
-
-## Pocket Companion.app
-
-```
-bun run companion:app        # -> dist/companion/Pocket Companion.app
-open "dist/companion/Pocket Companion.app"
-```
-
-The build compiles the daemon with `bun build --compile`, compiles
-`tools/companion/macos/PocketCompanion.swift` with `swiftc`, draws the icon,
-writes `Info.plist` (`LSUIElement`, `NSLocalNetworkUsageDescription`, the
-checkout's `dist/3ds` path) and signs the bundle ad hoc.
-
-The app is a menu-bar item. It starts `Contents/MacOS/pocket-companion serve`
-as a child process with `--parent-pid`, or attaches to a daemon already running
-for the same store, and reads its state from the control API once a second.
-The menu shows the listening address and the linked consoles. **Pair a
-Console…** opens a window with the QR code (CoreImage, level M, integer-scaled
-modules), the instruction for the 3DS, and the window's countdown; the same
-window lists paired consoles with **Forget** and the apps folders with a folder
-chooser. Quitting the app stops the daemon. Daemon output goes to
-`~/Library/Logs/Pocket Companion/companion.log`.
-
-Launch arguments for checks: `--show-window` opens the window at launch,
-`--pair` opens a pairing window, `--snapshot <png>` renders the window's
-content to a PNG after four seconds without screen-recording permission.
+| `protocol.ts` | Beacon, preamble and frame codec, the handshake proofs, the masked pairing key, the pairing URI |
+| `console-client.ts` | The console side in TypeScript: both handshake modes, ping, `net.stream`, catalog and install requests, the agent channel's messages and streams, a beacon listener |
+| `catalog.ts` | The companion's app offer from `.pocket` files, with each file's footer hash |
+| `qr.ts` | The pairing code's QR encoder: byte mode, level M, versions 1–10 |
+| `fetch.ts` | The companion's side of `net.stream`: destination checks, redirects, `maxBytes`, timeout, the proxy settings |
+| `stream-credit.ts` | The byte credit a streamed response body waits on |
 
 ## Tests
 
-`tests/pocket-link.test.ts` (unit stage of `tools/test.ts`) runs the companion
-on loopback against `tools/companion/console-client.ts`, the reference console
-implementation: protocol vectors, both handshake modes and every refusal, net
-against a local server (with and without `--allow-private`, redirects,
-`maxBytes`, timeout, cancel), catalog, install of a package with a `3ds-dev`
-variant, `catalog.changed`, the frame-size guard, beacons and the control API.
-The QR encoder is read back by an independent decoder in the test (format and
-version words, Reed–Solomon syndromes, payload) for versions 1–10 and all eight
-masks, and on macOS by CoreImage's `CIDetector`.
+Three files in the unit stage of `tools/test.ts` test the reference
+implementation and the console's C client:
+
+- `tests/pocket-link.test.ts`: protocol vectors (proofs, the masked key, the
+  beacon layout, preamble and frame header, split frames and the frame-size
+  guard, the pairing URI) and the destination policy. The QR encoder is read
+  back by an independent decoder in the test (format and version words,
+  Reed–Solomon syndromes, payload) for versions 1–10 and all eight masks, and
+  on macOS by CoreImage's `CIDetector`.
+- `tests/3ds-link.test.ts` compiles the socket-free half of the console's
+  client (`engine/host-services/link_proto.c`, `sha256.c`, `jscan.c`) and the
+  vendored QR decoder for the build machine and checks them against
+  `protocol.ts` and `qr.ts`: the same proofs and masked key, the same pairing
+  URI and beacon, and the decoder reading the pairing code at camera size.
+- `tests/worker-http-stream.test.ts`: the byte credit, response headers
+  before the body through `fetch.ts`, and `engine/host-services/link_http.c`
+  holding a full byte window and its disconnect terminal.
+
+Pocket Hub's tests run its companion on loopback against `console-client.ts`,
+and build `engine/host-services/link.c` into a POSIX link client that runs
+against the companion.
