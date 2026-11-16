@@ -134,11 +134,11 @@ LIBS := -ljpeg -lcitro3d -lctru -lm
 QUIRC_OBJECTS := $(BUILD)/quirc/quirc.o $(BUILD)/quirc/decode.o $(BUILD)/quirc/identify.o $(BUILD)/quirc/version_db.o
 # media.local (localmedia*.c) and its vendored decoders in vendor/.
 LOCALMEDIA_OBJECTS := $(BUILD)/localmedia.o $(BUILD)/localmedia_ids.o $(BUILD)/localmedia_tags.o $(BUILD)/localmedia_mp3.o $(BUILD)/localmedia_art.o $(BUILD)/localmedia_library.o $(BUILD)/localmedia_cache.o $(BUILD)/localmedia_dir.o $(BUILD)/localmedia_player.o $(BUILD)/localmedia_ring.o
-OBJECTS := $(BUILD)/worker.o $(BUILD)/worker_core.o $(BUILD)/worker_quickjs.o $(BUILD)/worker_quickjs_ui.o $(BUILD)/worker_runner.o $(BUILD)/pica_driver.o $(BUILD)/canonical_guest.o $(BUILD)/qjs_program.o $(BUILD)/instance.o $(BUILD)/main.o $(BUILD)/media.o $(LOCALMEDIA_OBJECTS) $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/dev_protocol.o $(BUILD)/devserver.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/input_policy.o $(BUILD)/input_source.o $(BUILD)/hooks.o \
-  $(BUILD)/sha256.o $(BUILD)/jscan.o $(BUILD)/link_proto.o $(BUILD)/link.o $(BUILD)/link_http.o $(BUILD)/launcher.o $(BUILD)/services_host.o \
+OBJECTS := $(BUILD)/worker.o $(BUILD)/worker_core.o $(BUILD)/worker_quickjs.o $(BUILD)/worker_quickjs_ui.o $(BUILD)/worker_runner.o $(BUILD)/pica_driver.o $(BUILD)/canonical_guest.o $(BUILD)/qjs_program.o $(BUILD)/instance.o $(BUILD)/main.o $(BUILD)/media.o $(LOCALMEDIA_OBJECTS) $(BUILD)/offload.o $(BUILD)/soc.o $(BUILD)/svcwire.o $(BUILD)/runtime.o $(BUILD)/devstats.o $(BUILD)/devmenu.o $(BUILD)/native.o $(BUILD)/hbldr.o $(BUILD)/gfx.o $(BUILD)/qjs.o $(BUILD)/input.o $(BUILD)/input_policy.o $(BUILD)/input_source.o $(BUILD)/hooks.o \
+  $(BUILD)/sha256.o $(BUILD)/jscan.o $(BUILD)/link2_proto.o $(BUILD)/link2.o $(BUILD)/link2_bsd.o $(BUILD)/link2_guest.o $(BUILD)/link2_channel_qjs.o $(BUILD)/link2_http.o $(BUILD)/link2_host.o $(BUILD)/launcher.o $(BUILD)/services_host.o \
   $(BUILD)/wifi.o $(BUILD)/camera.o \
   $(BUILD)/stage.o $(BUILD)/agent.o $(QUIRC_OBJECTS) $(BUILD)/vshader_shbin.o $(BUILD)/stage_shbin.o \
-  $(BUILD)/photos.o $(BUILD)/photos_image.o $(BUILD)/photos_jpeg.o $(BUILD)/fs.o $(BUILD)/transition.o $(BUILD)/bytecode.o
+  $(BUILD)/photos.o $(BUILD)/photos_image.o $(BUILD)/photos_jpeg.o $(BUILD)/fs.o $(BUILD)/transition.o $(BUILD)/bytecode.o $(BUILD)/bundle_compile.o $(BUILD)/push_timing.o $(BUILD)/slot_folders.o
 # A product extension's extension.mk adds to OBJECTS and LIBS, sets EXTENSION_HEADERS
 # to what its objects include, and writes its own rules for generated files.
 .DEFAULT_GOAL := all

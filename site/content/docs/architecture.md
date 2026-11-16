@@ -93,7 +93,9 @@ renderers complete inside the present call. A zero-copy deferred submission
 borrows texture storage and nothing else; the core keeps freed or overwritten
 storage of those textures until the submission retires. **Each acquired CPU region
 receives the frame's damage rectangles that intersect it, and the software
-renderer clears and replays only those rectangles.** Persistent
+renderer clears and replays only those rectangles.** A display that
+declares `POCKET_DISPLAY_FILTERED_SCALING` receives them grown by one pixel.
+Persistent
 display-buffer identities are required before this path can reuse a previous
 buffer's damage history; without one the damage is the whole region.
 Existing host damage APIs retain their compatibility paths.
@@ -403,7 +405,7 @@ same string as the spec namespace and the pak prefix: `audio.pcm` means
 name covers the app contract, the runtime namespace, and the asset key.
 `contracts/spec/` holds the shipped specs — `audio`, `db`, `fs`, `net`,
 `physics`, `platforms`, `spec`, plus the app contract (`pocket-manifest.ts`),
-host contract (`profile.ts`), package, system and runtime-wire files.
+host contract (`profile.ts`), package, system and link files.
 They are plain TypeScript data: `gen-rust.ts` generates
 `engine/spec/src/lib.rs`, `gen-c.ts` generates
 `contracts/generated/pocket_spec.h`, and `tests/generated-contracts.test.ts`

@@ -241,6 +241,9 @@ export interface HostOps {
   __dbgConnected?(): boolean;
   __dbgPoll?(): string | undefined;
   __dbgSend?(line: string): void;
+  /** One console line of the guest for the host's own log path (the 3DS's
+   *  `runtime.logs` over Pocket Link 2), whether a panel listens or not. */
+  __dbgLog?(level: string, text: string): void;
   /** On-demand native screenshot. The host transports bulk pixels outside
    *  the JSON control channel and its bridge converts them to PNG. */
   __dbgShot?(): boolean;
@@ -295,6 +298,32 @@ export function hostViewport(ops: HostOps): { w: number; h: number } | null {
     (ops as HostOps & { __viewport?: { w: number; h: number } }).__viewport ??
     null
   );
+}
+
+/** Subscribers to the logical viewport size (`onViewport`). */
+const viewportListeners = new Set<(w: number, h: number) => void>();
+
+/**
+ * Tell app code that the logical viewport is now `w` × `h`. Each framework
+ * entry calls this at the end of its `resizeViewport`, after the root layers
+ * and `ui.__viewport` carry the new size, so a listener that lays out from
+ * `hostViewport` reads the size it was called with.
+ */
+export function publishViewport(w: number, h: number): void {
+  for (const listener of [...viewportListeners]) listener(w, h);
+}
+
+/**
+ * Call `listener` with the new logical size on every live-viewport resize.
+ * Returns the function that removes it. A host without
+ * `display.viewport.live` never calls it: the size an app mounted at is the
+ * size it keeps.
+ */
+export function onViewport(listener: (w: number, h: number) => void): () => void {
+  viewportListeners.add(listener);
+  return () => {
+    viewportListeners.delete(listener);
+  };
 }
 
 export interface Host {

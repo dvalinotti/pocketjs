@@ -127,7 +127,7 @@ observable behavior share an id, and a different guarantee gets a new id.
 | `runtime.worker` | A second QuickJS runtime for `domains.worker`. |
 | `io.i2c`, `io.uart` | Worker node kinds. |
 | `net.http` | HTTP as a worker resource (`io.http`), under the limits of `contracts/spec/net.ts`. No UI realm has a network namespace. |
-| `display.viewport.live` | The logical viewport changes at run time; the app relayouts through `resizeViewport`. Console targets never provide it. |
+| `display.viewport.live` | The logical viewport changes at run time. The host calls `resizeViewport`, which resizes the root layers; app code reads the size with `useViewport` (Solid) or `onViewport`. Console targets never provide it. |
 | `display.auxiliary` | One fixed-size auxiliary UI output presented beside the primary viewport by the same instance. |
 | `ui.physics` | 2D bodies stepped by the UI core: worlds, jelly bodies, colliders, zones and particle emitters (`contracts/spec/physics.ts`). |
 | `ui.compositor-surfaces` | A System UI can place installed applications into native compositor surfaces. |
@@ -139,6 +139,7 @@ observable behavior share an id, and a different guarantee gets a new id.
 | `camera.qr` | Outer-camera preview texture and an on-device QR decoder. |
 | `camera.photo` | Stills kept as JPEG under the storage's DCIM folder: list, decode, delete. |
 | `link.companion` | The console's link to a paired companion computer: pairing, status, catalog, installs. |
+| `link.channel` | The running applet's channel to its computer side over the link, behind `globalThis.link.channel`: requests, events and byte streams (`docs/POCKET-LINK.md` §7). |
 | `system.wifi` | The console's radio and saved connections; reads and selects, never writes. |
 | `system.agent` | The system mascot on the top screen and the agent channel to the companion. |
 | `system.extension` | A product extension linked into the program: it draws the primary display and publishes its own global, and the guest's interface stays on the auxiliary surface. |
@@ -206,7 +207,8 @@ What resolves on which target:
 | window or widget without `acceptsFixed` | `viewport.fixedUnhosted` | `dynamic.default` | the dynamic variant |
 
 The plan records the winner as `viewport.policy`. An application that must
-relayout on resize declares `display.viewport.live`.
+relayout on resize declares `display.viewport.live` and derives its layout from
+[`useViewport`](/docs/api/#useviewport-solid).
 
 ### app.surfaces.auxiliary
 

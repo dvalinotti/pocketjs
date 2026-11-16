@@ -20,6 +20,10 @@ of the rows that span whole 128-byte cache lines, so PPA operands start and
 end on a line: four 1184-byte rows at 592 pixels wide, one 1280-byte row at
 640; a turned strip's quantum is the smallest multiple of that count and of 8.
 
+At a scale above 1 the PPA interpolates between neighbouring pixels, so the
+descriptor declares `POCKET_DISPLAY_FILTERED_SCALING` and the runtime grows
+damage by one pixel.
+
 With `move_copy` (a second GDMA channel) the driver declares
 `POCKET_DISPLAY_RETAINED_MOVE` and implements `move_pixels`: the runtime's
 damage planner then reuses content that only moved. Whole panel rows move
@@ -32,8 +36,9 @@ move completes before the frame's first present.
 
 `pocket_display_esp_dpi_set_overlay` hands the driver one square ARGB8888
 face at a picture position (the program's home ball). Flush blends the face
-over every presented region that covers it, so the framebuffer keeps the
-overlay wherever the picture changed under it, and the display's
+once over the bounds of the rectangles it presents, which may overlap, so the
+framebuffer keeps the overlay wherever the picture changed under it, and the
+display's
 `host_damage` reports the overlay's rectangle when its face changes and, after
 a move that carried its pixels, where they were and where they landed; the
 runtime adds those rectangles to the frame's plan. A face of `NULL` or size 0
