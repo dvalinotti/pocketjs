@@ -120,6 +120,7 @@ See [ESP-IDF](/docs/esp-idf/#embed-an-application).
 | `--extra-chars=<string>` | Force these codepoints into **every** baked atlas, on top of the collected charset and ASCII. |
 | `--density=N` | Raster samples per logical pixel for this build — an integer 1 through 255, default 1. A resolved plan owns the density, so passing both is an error. |
 | `--hz=N` | Bake this virtual tick rate into the bundle — an integer 1 through 240, default 60. The host must drive the surface at the same rate; a bundle whose baked rate differs from the host's `ui.__tickHz` throws before it mounts. |
+| `--layer=<module>` | Add a system layer ([`@pocketjs/framework/system-layers`](/docs/api/#pocketjsframeworksystem-layers)). Pass 1 walks the module; pass 2 imports it ahead of the entry. The flag repeats, and the layers import in the order given. |
 | `--font-regular=<path>` | Use this TTF instead of Inter Regular for the regular slots. |
 | `--font-bold=<path>` | Use this TTF instead of Inter Bold for the bold slots. |
 | `--font-mono=<path>` | Use this TTF instead of JetBrains Mono for the `font-mono` slots. |
@@ -190,6 +191,13 @@ does not hold its own. A row's per-framework availability also fixes what pass 1
 walks, so widening one changes class collection and therefore `styles.bin` bytes.
 See [Frameworks](/docs/frameworks/) for the public contract.
 
+**A bare import that resolves to `.ts` or `.tsx` source outside `node_modules`
+is walked like a relative import.** That is a package linked from its source
+tree, for example a product's guest modules linked into `node_modules`: the
+compiler follows the link to the real path, and the package's class strings
+and glyphs compile with the app's. A package installed under `node_modules`
+ships built JavaScript and stays outside pass 1; pass 2 bundles it unchanged.
+
 ### What it collects
 
 While the pristine AST is still in the author's shape (before the framework JSX
@@ -232,8 +240,8 @@ free.
 
 The walker skips one path: the one ending in `/styles.generated.ts`. Its
 literals **are** the compiled class names, so collecting them would feed the
-compiler its own output. Every other generated module — a launcher's asset
-registry, say — is ordinary app source whose literals pass 1 must see.
+compiler its own output. Every other generated module, such as a generated
+asset registry, is ordinary app source whose literals pass 1 must see.
 
 A pass‑1 summary line looks like:
 
