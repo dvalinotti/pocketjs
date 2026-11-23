@@ -11,17 +11,18 @@
 
 /* Host-test stand-in for the Rust package admission FFI. runtime.c still owns
  * every filesystem transition; this stub only supplies a deterministic footer
- * identity after checking the fixture marker and exact host ABI. */
+ * identity after checking the fixture marker, the 3DS facts and the exact
+ * host ABI. */
 int32_t pocket_package_open(
   const uint8_t *bytes,
   size_t length,
-  const uint8_t *target,
-  size_t target_length,
-  uint32_t host_abi, const uint8_t expected_profile_hash[32],
+  const pocket_profile_facts *facts,
+  uint32_t host_abi, const uint8_t *profile_hash,
   PocketGuestPackage *out
 ) {
+  (void)profile_hash;
   if (length != 32 || bytes[0] != 0x50 || host_abi != POCKET_BINDING_GENERATION ||
-      target_length != 7 || memcmp(target, "3ds-dev", 7) != 0) {
+      facts == NULL || facts->id_length != 7 || memcmp(facts->id, "3ds-dev", 7) != 0) {
     return 4;
   }
   uint64_t hash = 0;
@@ -84,7 +85,6 @@ int main(int argc, char **argv) {
   assert(runtime_storage_init(&state, error, sizeof error));
   assert(state.generation == 0 && state.active_hash == 0 && state.last_good_hash == 0);
   assert(strcmp(POCKET_RUNTIME_APP_ROOT, "sdmc:/pocketjs/runtime/apps/0123456789abcdef") == 0);
-  assert(strcmp(POCKET_RUNTIME_DEV_KEY, "sdmc:/pocketjs/runtime/dev.key") == 0);
 
   const uint64_t first_hash = 0x1111222233334444ULL;
   write_package(POCKET_RUNTIME_PENDING, first_hash, 1);

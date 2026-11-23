@@ -1,5 +1,5 @@
 import { POCKET_BINDING_GENERATION } from "./binding-generation.ts";
-// Deterministic codegen: contracts/spec/{spec,audio,db,fs,net,physics}.ts -> engine/spec/src/lib.rs.
+// Deterministic codegen: contracts/spec/{spec,audio,db,fs,pack,physics}.ts -> engine/spec/src/lib.rs.
 //
 // Run from PocketJS/:  bun contracts/spec/gen-rust.ts
 //
@@ -18,14 +18,6 @@ import {
   audioFramesForTick,
 } from "./audio.ts";
 import {
-  DB_BLOB_KEY,
-  DB_MAX_DATABASES,
-  DB_MAX_RESULT_ROWS,
-  DB_MAX_SAFE_INTEGER,
-  DB_MEMORY,
-  DB_OP,
-} from "./db.ts";
-import {
   FS_BLOB_KEY,
   FS_MAX_DEPTH,
   FS_MAX_DIR_ENTRIES,
@@ -37,19 +29,16 @@ import {
   FS_WRITE_TRUNCATE,
 } from "./fs.ts";
 import {
-  NET_DEFAULT_RESPONSE_BYTES,
-  NET_DEFAULT_TIMEOUT_MS,
-  NET_ERROR,
-  NET_EVENT,
-  NET_MAX_HEADER_BYTES,
-  NET_MAX_HEADERS,
-  NET_MAX_INFLIGHT,
-  NET_MAX_REDIRECTS,
-  NET_MAX_REQUEST_BYTES,
-  NET_MAX_RESPONSE_BYTES,
-  NET_MAX_TIMEOUT_MS,
-  NET_METHODS,
-  NET_OP,
+  PACK_MAX_DEPTH,
+  PACK_MAX_HANDLES,
+  PACK_MAX_IMG_BYTES,
+  PACK_MAX_PATH_BYTES,
+  PACK_MAX_SEGMENT_BYTES,
+  PACK_OP,
+  PACK_OPEN_MISSING,
+  PACK_OPEN_PENDING,
+} from "./pack.ts";
+import {
 } from "./net.ts";
 import {
   PHYSICS_ALPHA_CURVE,
@@ -394,7 +383,7 @@ export function generateRust(): string {
   put("");
 
   // --- svc / stream -----------------------------------------------------------
-  put("/// Host service channel limits (spec.ts SVC — pocket-svc/<app>/ mailbox).");
+  put("/// Host service channel limits (spec.ts SVC — `pocket-svc/<app>/` mailbox).");
   put("pub mod svc {");
   put(`    pub const POLL_BUF: usize = ${SVC_POLL_BUF};`);
   put(`    pub const IMG_MAX_BYTES: usize = ${SVC_IMG_MAX_BYTES};`);
@@ -470,7 +459,7 @@ export function generateRust(): string {
   put("");
 
   // --- drawlist ------------------------------------------------------------------
-  put("/// DrawList op codes (core -> backend Vec<u32> words; layout in spec.ts).");
+  put("/// DrawList op codes (core -> backend `Vec<u32>` words; layout in spec.ts).");
   put("/// Word counts incl. header: RECT 4, GRAD_RECT 6, GLYPH_RUN 3+2n,");
   put("/// TEX_QUAD 9, SCISSOR 3, SCISSOR_POP 1, TRI 7, TEX_TRI 12,");
   put("/// TEXT_RUN 8+ceil(bytes/4), SURFACE_QUAD 9.");
@@ -484,7 +473,7 @@ export function generateRust(): string {
 
   // --- pak ----------------------------------------------------------------------
   put("/// .pak container constants (byte-compatible with dreamcart's format;");
-  put("/// copied from framework/bake/pak.ts + docs/pak-format.md).");
+  put("/// implemented by framework/compiler/pak.ts and framework/src/pak.ts).");
   put("pub mod pak {");
   put(`    pub const MAGIC: u32 = ${hex(PAK_MAGIC)}; // 'DCPK' LE`);
   put(`    pub const VERSION: u16 = ${PAK_VERSION};`);
@@ -542,35 +531,11 @@ export function generateRust(): string {
   put("}");
   put("");
 
-  // --- db module -----------------------------------------------------------
-  // The db MODULE's boundary (contracts/spec/db.ts): SQLite behind five
-  // synchronous ops, mounted as `globalThis.db`, independent of the ui
-  // surface. A native host implementing it reads these constants; the
-  // reference implementation is engine/crates/pocket-db.
-  put("/// DB module boundary (contracts/spec/db.ts — `globalThis.db`).");
-  put("/// SQLite behind five synchronous ops; rows cross as one JSON line per");
-  put("/// query() call. The module owns no clock and emits no events.");
-  put("pub mod db {");
-  for (const [name, v] of Object.entries(DB_OP)) {
-    put(`    pub const OP_${screaming(name)}: u8 = ${v};`);
-  }
-  put(`    /// The in-memory database name (private to the handle).`);
-  put(`    pub const MEMORY: &str = ${JSON.stringify(DB_MEMORY)};`);
-  put(`    /// Marker key for a BLOB value inside a row or a parameter list.`);
-  put(`    pub const BLOB_KEY: &str = ${JSON.stringify(DB_BLOB_KEY)};`);
-  put(`    /// Largest integer magnitude that crosses the boundary losslessly.`);
-  put(`    pub const MAX_SAFE_INTEGER: i64 = ${DB_MAX_SAFE_INTEGER};`);
-  put(`    pub const MAX_DATABASES: usize = ${DB_MAX_DATABASES};`);
-  put(`    /// Result-row ceiling per query() call (exceeding it fails the op).`);
-  put(`    pub const MAX_RESULT_ROWS: usize = ${DB_MAX_RESULT_ROWS};`);
-  put("}");
-  put("");
-
   // --- fs module -----------------------------------------------------------
   // The fs MODULE's boundary (contracts/spec/fs.ts): a per-app file tree
   // behind nine synchronous ops, mounted as `globalThis.fs`, independent of
   // the ui surface. A native host implementing it reads these constants; the
-  // reference implementation is engine/crates/pocket-fs.
+  // implementations are engine/host-services/fs.c and platforms/sim/fs.ts.
   put("/// FS module boundary (contracts/spec/fs.ts — `globalThis.fs`).");
   put("/// A per-app file tree behind nine synchronous ops; every path resolves");
   put("/// under the app's own data root. No clock, no events, no mtime.");
@@ -581,7 +546,7 @@ export function generateRust(): string {
   put(`    /// write() modes.`);
   put(`    pub const WRITE_TRUNCATE: u32 = ${FS_WRITE_TRUNCATE};`);
   put(`    pub const WRITE_APPEND: u32 = ${FS_WRITE_APPEND};`);
-  put(`    /// Marker key for a bytes payload (db's blob spelling).`);
+  put(`    /// Marker key for a bytes payload.`);
   put(`    pub const BLOB_KEY: &str = ${JSON.stringify(FS_BLOB_KEY)};`);
   put(`    /// Maximum UTF-8 bytes in one path segment.`);
   put(`    pub const MAX_SEGMENT_BYTES: usize = ${FS_MAX_SEGMENT_BYTES};`);
@@ -596,29 +561,28 @@ export function generateRust(): string {
   put("}");
   put("");
 
-  // --- net module ---------------------------------------------------------------
-  put("/// NET module boundary (contracts/spec/net.ts — `globalThis.net`).");
-  put("/// Bounded whole-response HTTP; completions batch to tick boundaries.");
-  put("pub mod net {");
-  for (const [name, v] of Object.entries(NET_OP)) {
+  // --- pack module ---------------------------------------------------------
+  // The pack MODULE's boundary (contracts/spec/pack.ts): read-only files under
+  // the game data root, mounted as `globalThis.pack`. The native
+  // implementation is programs/psp/src/pack_ops.rs.
+  put("/// PACK module boundary (contracts/spec/pack.ts — `globalThis.pack`).");
+  put("/// Read-only files under the game data root; loadImg decodes an IMG entry");
+  put("/// to a texture without passing its bytes through the JS heap.");
+  put("pub mod pack {");
+  for (const [name, v] of Object.entries(PACK_OP)) {
     put(`    pub const OP_${screaming(name)}: u8 = ${v};`);
   }
-  put(`    pub const MAX_INFLIGHT: usize = ${NET_MAX_INFLIGHT};`);
-  put(`    pub const MAX_REQUEST_BYTES: usize = ${NET_MAX_REQUEST_BYTES};`);
-  put(`    pub const DEFAULT_RESPONSE_BYTES: usize = ${NET_DEFAULT_RESPONSE_BYTES};`);
-  put(`    pub const MAX_RESPONSE_BYTES: usize = ${NET_MAX_RESPONSE_BYTES};`);
-  put(`    pub const MAX_HEADERS: usize = ${NET_MAX_HEADERS};`);
-  put(`    pub const MAX_HEADER_BYTES: usize = ${NET_MAX_HEADER_BYTES};`);
-  put(`    pub const DEFAULT_TIMEOUT_MS: u32 = ${NET_DEFAULT_TIMEOUT_MS};`);
-  put(`    pub const MAX_TIMEOUT_MS: u32 = ${NET_MAX_TIMEOUT_MS};`);
-  put(`    pub const MAX_REDIRECTS: usize = ${NET_MAX_REDIRECTS};`);
-  put(`    pub const METHODS: [&str; ${NET_METHODS.length}] = [${NET_METHODS.map((method) => JSON.stringify(method)).join(", ")}];`);
-  for (const [name, v] of Object.entries(NET_EVENT)) {
-    put(`    pub const EVENT_${screaming(name)}: &str = ${JSON.stringify(v)};`);
-  }
-  for (const [name, v] of Object.entries(NET_ERROR)) {
-    put(`    pub const ERROR_${screaming(name)}: &str = ${JSON.stringify(v)};`);
-  }
+  put(`    /// open() results below zero.`);
+  put(`    pub const OPEN_MISSING: i32 = ${PACK_OPEN_MISSING};`);
+  put(`    pub const OPEN_PENDING: i32 = ${PACK_OPEN_PENDING};`);
+  put(`    /// Files open at once per guest.`);
+  put(`    pub const MAX_HANDLES: usize = ${PACK_MAX_HANDLES};`);
+  put(`    /// Upper bound of one loadImg byte range.`);
+  put(`    pub const MAX_IMG_BYTES: usize = ${PACK_MAX_IMG_BYTES};`);
+  put(`    /// Path grammar ceilings (UTF-8 bytes; segments).`);
+  put(`    pub const MAX_PATH_BYTES: usize = ${PACK_MAX_PATH_BYTES};`);
+  put(`    pub const MAX_SEGMENT_BYTES: usize = ${PACK_MAX_SEGMENT_BYTES};`);
+  put(`    pub const MAX_DEPTH: usize = ${PACK_MAX_DEPTH};`);
   put("}");
   put("");
 
@@ -665,7 +629,7 @@ if (import.meta.main) {
   await Bun.write(out, generateRust());
   console.log(`wrote ${out}`);
   for (const [path, source] of [
-    ["../../engine/crates/microts/src/spec.rs", generateMicroTsRust()],
+    ["../../engine/microts-runtime/src/spec.rs", generateMicroTsRust()],
     ["../../framework/src/numeric-microts.ts", generateMicroTsNumericTypes()],
     ["../../framework/src/std-microts.d.ts", generateMicroTsStdDeclarations()],
     ["../../framework/src/component-types-microts.ts", generateMicroTsComponentTypes()],

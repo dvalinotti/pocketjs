@@ -3,6 +3,60 @@
 Engine and site milestones, newest first. Versions track the
 `@pocketjs/framework` npm package.
 
+## 0.16.0 — November 2, 2026
+
+**Pocket Applets share companion services, IO runs in isolated workers, and 2D games run on PSP and web.**
+
+This release separates runtime, driver and program ownership, adds Tab5 and
+SF32LB5x platform support, and publishes the Rust SDK crates at 0.16.0 alongside
+the framework and CLI.
+
+### Breaking changes
+
+- IO workers replace the previous worker API; worker facts settle as Promises
+  and no longer use turn time limits.
+- The db module and Rust data crates are removed.
+
+### Features
+
+- feat(microts): show the home page counter in Solid and Vue (#602) ([66caf4e5](https://github.com/pocket-nexus/pocketjs/commit/66caf4e51ca80ecfd8fd8395eb8643f243034686))
+- feat: companion services, Pocket Applets, camera.photo and data.fs on the 3DS, single-screen mode (#598) ([cf77d805](https://github.com/pocket-nexus/pocketjs/commit/cf77d805b66c3b26c51337be6333c82f25e5b5a4))
+- feat(3ds): app switches run under a host-drawn transition, boot from cached bytecode, and SELECT answers inside long frames (#605) ([e27bff3e](https://github.com/pocket-nexus/pocketjs/commit/e27bff3e96df3c7b3c8263a34f2362b964df04fb))
+- feat(video-outro): the Pocket3D card says "every device" and takes 3d.pocket.nexus's ground (#614) ([5216f618](https://github.com/pocket-nexus/pocketjs/commit/5216f61822173e4bb3f60f5dbd0d3c8f48c67a25))
+- feat(esp-idf): Tab5 platform support from #616 without the board program (#617) ([c5012186](https://github.com/pocket-nexus/pocketjs/commit/c501218675c52f9d57853431359f7b66c3a675e8))
+- feat(sifli): SF32LB5x platform with an EPIC renderer on the driver contracts (#338) ([78be9468](https://github.com/pocket-nexus/pocketjs/commit/78be94682060bc54dbf01c867a0bcc7d72f7f233))
+- feat(psp): net, link and media over the PSPLINK share, answered by a companion's USB carrier (#609) ([33bf39dd](https://github.com/pocket-nexus/pocketjs/commit/33bf39ddcd5fe75f5ee86153d47b023301683125))
+- feat(companion): Pocket Companion sets up Pocket Shell, its applets and their services in its own window, and ships signed with the applets in it (#613) ([0e8eedb1](https://github.com/pocket-nexus/pocketjs/commit/0e8eedb120ebdf6effab59386fa6a4e7e84c2af3))
+- feat(cardputer-zero): Pocket Companion's own screen on the CardputerZero, in PocketJS (#615) ([74d36956](https://github.com/pocket-nexus/pocketjs/commit/74d369561e85af3a9cbb5d0c7391b299f9f78c49))
+- feat(applet): the full-screen presentation, one program for the touch surface and the PSP screen (#610) ([c59315d2](https://github.com/pocket-nexus/pocketjs/commit/c59315d274e8fee78cb9e7ccf1add6b6a27e6c76))
+- feat(worker)!: add isolated IO workers and migrate 3ds HTTP ([9a746094](https://github.com/pocket-nexus/pocketjs/commit/9a7460946a666b16db7c387c931a857973d54679))
+- feat(worker)!: settle facts as Promises and drop the turn time limits ([66e39a0f](https://github.com/pocket-nexus/pocketjs/commit/66e39a0fbece6e545a4f4772b11d6c452477e32f))
+- feat(cardputer-zero): run the companion screen's control API calls in a worker (#625) ([f542a63b](https://github.com/pocket-nexus/pocketjs/commit/f542a63b4706ef867f407250284d6ece2f0468ea))
+- feat(package): admit packages by host facts and host contracts (#631) ([4b639284](https://github.com/pocket-nexus/pocketjs/commit/4b6392843ee8cc2eaf198a3f00e7096c3ec7bb6b))
+- feat(gles): let a host that swaps right after the renderer skip glFinish (#634) ([6ca9f914](https://github.com/pocket-nexus/pocketjs/commit/6ca9f914f6aa0f0c66bcc1a3f0e15c3d22127746))
+- feat(3ds): let a program link a product extension (#637) ([0fb7adfa](https://github.com/pocket-nexus/pocketjs/commit/0fb7adfabb3723a1b20760b1cab1503a0a6ec670))
+- feat(contracts): add system.device, audio.capture and the Tab5 worker fixes (#635) ([daad0585](https://github.com/pocket-nexus/pocketjs/commit/daad0585fbfc8121895824ec0b4f762cce06131e))
+- feat(worker): add an I2C receive step without a register phase (#639) ([38eb2df6](https://github.com/pocket-nexus/pocketjs/commit/38eb2df6ec7bbddbc68a5669ce71dbef2516be19))
+- feat(game2d): a 2D game layer and on-demand content packs for PSP and web (#644) ([9f49a7a6](https://github.com/pocket-nexus/pocketjs/commit/9f49a7a606c27fa1fee7279531402e48e6908068))
+- feat(release): prepare release PRs and publish on merge (#647) ([d802fca0](https://github.com/pocket-nexus/pocketjs/commit/d802fca08d4ecbd07a92236419aa7179e2b48a2c))
+
+### Fixes
+
+- fix(framework): keep the Vue Vapor Portal host hit-transparent (#612) ([a9f186e2](https://github.com/pocket-nexus/pocketjs/commit/a9f186e2aa385fb353b05a12c1c8c592b76bec80))
+- fix(present): drop motion bounds decoded under older resources (#620) ([f0eac1be](https://github.com/pocket-nexus/pocketjs/commit/f0eac1bea132ee78d2116f88c720dd393fc53a61))
+- fix(launcher): expand app.theme references when packing launcher packages (#621) ([e6770376](https://github.com/pocket-nexus/pocketjs/commit/e6770376626a4de5c93eaa6fb048e7e9ffb81f9f))
+- fix(ci): avoid recursive Rust and LLVM downloads (#628) ([99924de4](https://github.com/pocket-nexus/pocketjs/commit/99924de47c62fa36f526a8791055d91cbbdb3836))
+
+### Other changes
+
+- refactor(architecture): separate runtime drivers and program ownership (#603) ([1c248fb1](https://github.com/pocket-nexus/pocketjs/commit/1c248fb18f976e91a313f11e0dbb35273c9e48dd))
+- perf: UTF-8 decoding through built-ins, and 3DS font atlases as LA8 written in one pass (#606) ([1894be8e](https://github.com/pocket-nexus/pocketjs/commit/1894be8efaac00440202a50fec97eb2bb41628f8))
+- chore: remove the db module and the Rust data crates (#622) ([7d4f790f](https://github.com/pocket-nexus/pocketjs/commit/7d4f790f2e0e646bd22624512078219a67e12707))
+- chore(examples): remove worker-http demo (#630) ([8bc05257](https://github.com/pocket-nexus/pocketjs/commit/8bc0525776efe779ef9592e0b91574cfbc91f60b))
+- docs(site): a page that says what a Pocket Applet is (#638) ([84590132](https://github.com/pocket-nexus/pocketjs/commit/84590132dfc823ba132d82e49d6bb31fdb1e2b9f))
+- docs(readme): lead with what Pocket Studio shows (#645) ([c997f007](https://github.com/pocket-nexus/pocketjs/commit/c997f007ad62214112282caef57b56ff657ed3bd))
+- docs(crates): prepare Rust SDK packages for publication (#646) ([2e4c357b](https://github.com/pocket-nexus/pocketjs/commit/2e4c357bbed1ad03a058d6b02ee48de5fd947a11))
+
 ## 0.15.0 — October 20, 2026
 
 **One runtime per console runs any game's .pocket, and `pocket` installs the toolchains and selects the target it builds for.**
@@ -277,8 +331,7 @@ without characters arriving a few at a time.
   buffering. Media support adds local downloads and timed captions. Clear's
   companion input uses reusable glyph resources, revision-checked candidate
   windows and text layouts that preserve cached characters across edits.
-- **Desktop rendering and native integrations expand.** Desktop hosts gain
-  portable GPU rendering and offloaded text. ESP-IDF integrations provide
+- **Native integrations expand.** ESP-IDF integrations provide
   separate package, guest, UI and renderer components for ESP32-P4 and S3.
   The 3DS runtime isolates application state, returns to the Homebrew Launcher,
   and acquires native sources without PSP dependencies. Legacy iPod touch
@@ -292,11 +345,9 @@ without characters arriving a few at a time.
 
 ## 0.11.0 — August 30, 2026
 
-**Two more device families run PocketJS, a second backend class paints through gpui and measures text on the host, and a paired Nintendo 3DS takes new guests over Wi-Fi.**
-0.11.0 adds the Nintendo 3DS and the BlackBerry Classic to the host set, a
-backend class that hands text measurement to the platform instead of a baked
-atlas, and a System that supervises several guests behind one compositor on
-macOS, Linux and the browser. Both new device profiles remain private
+**Two more device families run PocketJS, and a paired Nintendo 3DS takes new guests over Wi-Fi.**
+0.11.0 adds the Nintendo 3DS and the BlackBerry Classic to the host set and
+a System that supervises several guests behind one browser compositor. Both new device profiles remain private
 development targets: each records an exact hardware and firmware tuple, and
 neither advertises a production capability from a build alone.
 
@@ -329,21 +380,9 @@ neither advertises a production capability from a build alone.
   The earlier Android compatibility host has been removed. First device run
   recorded on an SQC100-4 at 10.3.3.3216; the [port write-up](/blog/blackberry-classic/) walks the QNX
   route onto the square screen.
-- **A second backend class paints through gpui and measures text on the
-  host.** The portable family (wgpu, software raster, PPA, GLES2) keeps
-  executing the DrawList against compile-time baked font atlases.
-  `engine/backends/gpui` paints through Zed's gpui/Metal renderer instead, and
-  `text::MeasureFn` plus `DRAW_OP.TEXT_RUN` route measurement and shaping to
-  CoreText when an app opts in — a `styleHash` word keeps identical word
-  streams pixel-identical, so demand-render hashes stay truthful. The
-  `macos-app` target ships with it, together with a `wrapText` host op and a
-  Notepad whose word wrap, hit-testing, caret movement, selection and
-  undo/redo all read one visual-segment layout, so reflow on resize falls out
-  of the reactive width.
 - **A System supervises several guests behind one compositor.** Pocket System
   resolution, role-scoped compositor surfaces and isolated `AppInstance`
-  supervision arrive with a product-neutral macOS compositor host, and Linux
-  and browser System hosts run the same resolved plan.
+  supervision let the browser System host run one resolved plan.
 - **The manifest and the resolved plan carry companion adapters and viewport
   policy.** `app.companions` names the exact `svcOpen` service names an app's
   adapters speak, and the plan carries `companions` and `viewport.policy`, so
@@ -365,17 +404,7 @@ neither advertises a production capability from a build alone.
   where it was. `products/3ds/src/gfx.c` copies the spec's `GradDir` ordinals
   into C by hand and had `ToTop` and `ToBottom` swapped, which inverted every
   vertical gradient on the one backend that does not read the generated Rust
-  enum. The gpui raster fallback renders the full viewport and composites
-  transparently, and the compiler's path handling is portable on Windows
-  again.
-- **PocketJS 98 and a desktop benchmark measure the gpui host.** `apps/desk98`
-  is a Windows 98 desktop as one guest — draggable, resizable, z-ordered
-  windows, taskbar, Start menu, Notepad, Minesweeper and the classic
-  shortcuts — with window moves riding paint-only transform props so a drag
-  never relayouts and the idle desktop holds the demand-render governor at a
-  few frames a second. `tools/bench-desktop.ts` measures byte-identical web
-  editors shelled by Tauri v2 and Electron against the Pocket note on the same
-  host; the numbers and their fairness caveats ship with the report.
+  enum. The compiler's path handling is portable on Windows again.
 - **The site is one design system across a nine-chapter homepage.** Shared
   tokens, chrome and base stylesheets replace the per-page CSS, the landing
   carries compatibility receipts, and an icon family covers every surface from
@@ -437,7 +466,7 @@ a build or upload alone.
   while concrete material recipes remain application-owned. Pocket3D model
   sockets and the optional stylized scene path present that state without
   moving simulation policy into the renderer.
-- **Font and desktop-host regressions are closed.** The font baker now closes
+- **Font and widget regressions are closed.** The font baker now closes
   implicitly closed CFF contours before scanline filling, retaining their final
   edge, and the Note and widget launchers resolve their Cargo outputs from the
   current `engine/` workspace rather than the retired nested path.

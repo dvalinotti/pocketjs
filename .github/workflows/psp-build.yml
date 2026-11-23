@@ -4,7 +4,9 @@ name: PSP build
 # into an empty cache, checks that a second add downloads nothing, and builds
 # the hero EBOOT through compile and the program-owned build recipe. The target C compiler and archiver
 # are `false`: QuickJS arrives as a prebuilt archive. The generated guest uses
-# its explicit LLVM compiler and the pinned SDK headers.
+# its explicit LLVM compiler and the pinned SDK headers. The EBOOT is the same
+# mipsel binary from any host, so one Linux runner builds it; host selection
+# of the toolchain archive is a unit test (tests/targets-catalog.test.ts).
 
 on:
   pull_request:
@@ -15,9 +17,7 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "contracts/**"
-      - "profiles/psp-runtime.ts"
-      - "engine/render/tex-cache/**"
-      - "engine/render/tri-batch/**"
+      - "hosts/psp-runtime/pocket.host.json"
       - "framework/compiler/**"
       - "framework/src/manifest/**"
       - "tools/profile-export.ts"
@@ -26,11 +26,11 @@ on:
       - "tools/psp.ts"
       - "tools/build/**"
       - "platforms/psp/**"
-      - "profiles/psp.ts"
+      - "hosts/psp/pocket.host.json"
       - "tools/psp-linker.ts"
       - "engine/guest-quickjs/**"
       - "engine/runtime/**"
-      - "engine/runtime-cabi/**"
+      - "programs/sdk/archive/**"
       - "engine/profile-build/**"
       - "tools/pocket.ts"
       - "tools/cli/**"
@@ -40,11 +40,10 @@ on:
       - "engine/spec/**"
       - "engine/drivers/**"
       - "engine/raster/**"
-      - "engine/present/**"
       - "engine/package/**"
       - "engine/modules/media/**"
-      - "engine/render/draw-ops/**"
-      - "engine/render/glyph-pages/**"
+      - "engine/render/Cargo.toml"
+      - "engine/render/src/**"
       - "package.json"
       - "bun.lock"
   push:
@@ -61,11 +60,7 @@ concurrency:
 
 jobs:
   eboot:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -73,17 +68,11 @@ jobs:
         with:
           bun-version-file: .bun-version
       - run: bun install --frozen-lockfile
-      - name: LLVM for the generated PSP guest (Linux)
-        if: runner.os == 'Linux'
+      - name: LLVM for the generated PSP guest
         run: |
           sudo apt-get update
           sudo apt-get install -y clang llvm
           echo "POCKETJS_LLVM_BIN=/usr/bin" >> "$GITHUB_ENV"
-      - name: LLVM for the generated PSP guest (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install llvm
-          echo "POCKETJS_LLVM_BIN=$(brew --prefix llvm)/bin" >> "$GITHUB_ENV"
       - name: Empty cache
         run: echo "POCKET_NEXUS_CACHE_DIR=$RUNNER_TEMP/pocket-nexus" >> "$GITHUB_ENV"
       - name: pocket target add psp
@@ -99,6 +88,6 @@ jobs:
           CC_mipsel_sony_psp: /usr/bin/false
           AR_mipsel_sony_psp: /usr/bin/false
         run: |
-          bun tools/pocket.ts compile --target psp --manifest apps/hero/pocket.json --project-root . --output .pocket-build/validation/psp-ci/hero.pocket
+          bun tools/pocket.ts compile --target psp --manifest apps/hero/pocket.app.json --project-root . --output .pocket-build/validation/psp-ci/hero.pocket
           bun tools/pocket.ts build --target psp --pocket .pocket-build/validation/psp-ci/hero.pocket --out .pocket-build/validation/psp-ci/native
           bun -e 'import { statSync } from "node:fs"; const r = await Bun.file(".pocket-build/validation/psp-ci/native/build-receipt.json").json(); if (!r.success || !r.artifact || statSync(r.artifact).size === 0) process.exit(1);'

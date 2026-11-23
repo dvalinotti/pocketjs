@@ -3,15 +3,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { POCKET_TARGETS, type TargetProfile } from "../contracts/spec/platforms.ts";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
-import { POCKET_PROFILES } from "../profiles/index.ts";
+import { POCKET_PROFILES } from "../hosts/index.ts";
 import { resolve3dsBuildPlan } from "../tools/3ds-profile.ts";
-import { BLACKBERRY_QNX_DEV_TARGET_ID, resolveBlackBerryClassicBuildPlan } from "../tools/blackberry-classic-profile.ts";
-import { resolveIPhone2GBuildPlan } from "../tools/iphone2g-profile.ts";
-import { resolveIPhone4SBuildPlan } from "../tools/iphone4s-profile.ts";
 import { resolveIPodTouchBuildPlan } from "../tools/ipodtouch-profile.ts";
-import { resolveMeizuM8BuildPlan } from "../tools/meizu-m8-profile.ts";
-import { resolveMotoGPlayBuildPlan } from "../tools/moto-g-play-profile.ts";
-import { resolveRedmi1sBuildPlan } from "../tools/redmi-1s-profile.ts";
 import { resolveSymbianE7BuildPlan } from "../tools/symbian-profile.ts";
 import { CATALOG, COMMAND_WORDS, catalogEntry, catalogEntryForContract } from "../tools/targets/index.ts";
 import { HOST_IDS, currentHost } from "../tools/targets/types.ts";
@@ -30,7 +24,6 @@ function minimalManifest(profile: TargetProfile<string>): unknown {
     $schema: "https://pocketjs.dev/schema/pocket-2.json",
     pocket: 2,
     id: "dev.example.catalog",
-    name: "catalog",
     title: "Catalog",
     version: "0.1.0",
     engine: { capabilities: { requires: ["text.glyphs.baked"] } },
@@ -78,15 +71,9 @@ describe("target catalog", () => {
 
   test("catalog resolution equals each device profile's own resolver", () => {
     const cases: [string, string, (manifest: unknown) => ReturnType<typeof resolve3dsBuildPlan>][] = [
-      ["3ds", "apps/3ds-demo/pocket.json", resolve3dsBuildPlan],
-      ["moto-g-play", "apps/clear/pocket.android.json", resolveMotoGPlayBuildPlan],
-      ["redmi-1s", "apps/clear/pocket.redmi-1s.json", resolveRedmi1sBuildPlan],
-      ["blackberry-classic", "apps/blackberry-classic-demo/pocket.json", (m) => resolveBlackBerryClassicBuildPlan(m, BLACKBERRY_QNX_DEV_TARGET_ID)],
-      ["meizu-m8", "apps/meizu-m8-demo/pocket.json", resolveMeizuM8BuildPlan],
-      ["nokia-e7", "apps/clear/pocket.symbian.json", resolveSymbianE7BuildPlan],
-      ["iphone2g", "apps/iphone2g-demo/pocket.json", resolveIPhone2GBuildPlan],
-      ["iphone4s", "apps/iphone4s-demo/pocket.json", resolveIPhone4SBuildPlan],
-      ["ipodtouch6", "apps/ipodtouch-demo/pocket.json", resolveIPodTouchBuildPlan],
+      ["3ds", "apps/3ds-demo/pocket.app.json", resolve3dsBuildPlan],
+      ["nokia-e7", "apps/clear/pocket.app.json", resolveSymbianE7BuildPlan],
+      ["ipodtouch6", "apps/ipodtouch-demo/pocket.app.json", resolveIPodTouchBuildPlan],
     ];
     for (const [id, manifestPath, resolver] of cases) {
       const manifest = readJson(manifestPath);
@@ -129,12 +116,12 @@ describe("tools/pocket.ts and the catalog", () => {
   });
 
   test("application compilation selects the actual profile id, not a toolchain alias", () => {
-    const checked = pocket(["check", "--target", "3ds-dev", "--manifest", "apps/3ds-demo/pocket.json", "--project-root", "."]);
+    const checked = pocket(["check", "--target", "3ds-dev", "--manifest", "apps/3ds-demo/pocket.app.json", "--project-root", "."]);
     expect(checked.code, checked.err).toBe(0);
-    expect(checked.out).toContain("✓ 3ds-dev satisfies pocket.json capabilities");
+    expect(checked.out).toContain("✓ 3ds-dev satisfies pocket.app.json capabilities");
 
-    const contract = pocket(["check", "--target", "3ds", "--manifest", "apps/3ds-demo/pocket.json", "--project-root", "."]);
+    const contract = pocket(["check", "--target", "3ds", "--manifest", "apps/3ds-demo/pocket.app.json", "--project-root", "."]);
     expect(contract.code).toBe(1);
-    expect(contract.err).toContain("unknown profile or module 3ds");
+    expect(contract.err).toContain("unknown host 3ds; name a built-in host id or a pocket.host.json file");
   });
 });

@@ -2,6 +2,7 @@ import { resolveSourceEntry, sourceAppContent, sourceOutputName } from "./source
 import { resolveSolidAotModel } from "../microts/compiler/aot-solid-browser.ts";
 import { modelConfiguration } from "../microts/compiler/aot-model-build.ts";
 import { BuildInputs } from "../framework/compiler/build-inputs.ts";
+import { buildWorker } from "./build-worker.ts";
 // tools/build.ts <app> — the TWO-PASS app build (docs/DESIGN.md "Build pipeline").
 //
 //   bun tools/build.ts apps/hero/app.tsx    (or just `hero`)
@@ -15,7 +16,7 @@ import { BuildInputs } from "../framework/compiler/build-inputs.ts";
 //         placeholder); pak.ts packs it all -> dist/<app>.pak.
 // pass 2  Bun.build (plugin serves the CACHED pass-1 transforms plus this
 //         build's in-memory generated styles, iife, target browser,
-//         minify false) -> dist/<app>.js.
+//         minify off unless POCKETJS_MINIFY=1) -> dist/<app>.js.
 //
 // Flags:
 //   --framework=solid|vue-vapor|octane  select the framework for this build
@@ -23,14 +24,18 @@ import { BuildInputs } from "../framework/compiler/build-inputs.ts";
 //   --density=<integer>          low-level target sampling density (default 1)
 //   --font-regular=<path>        override the regular font source
 //   --font-bold=<path>           override the bold font source
+//   --font-mono=<path>           override the mono font source (font-mono slots)
 //   --outdir=<path>              write <app>.js/.pak here instead of dist/
 //                                (external repos build their apps against a
 //                                vendored PocketJS and keep outputs local)
+//   --layer=<module>             a system layer (@pocketjs/framework/system-layers):
+//                                pass 1 walks the module and pass 2 imports it
+//                                ahead of the app's entry; repeatable
 //   --strict-classes             fail when a `class` attribute holds a literal
 //                                that does not compile; without it the build
 //                                prints the same finding as a warning
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve as resolvePath, join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IMG_FLAG_LINEAR, PSM } from "../contracts/spec/spec.ts";
@@ -48,6 +53,8 @@ import { animationThemeSchema } from "../contracts/spec/pocket-manifest.ts";
 import { validateSchema, type ContractDiagnostic } from "../framework/src/manifest/schema.ts";
 import { verifyPlanHash, verifyPlanProfile, type ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 import { POCKET_BINDING_GENERATION } from "../contracts/spec/binding-generation.ts";
+import { profileResponseBytes } from "../contracts/spec/profile.ts";
+import { resolveWorkerChannels } from "../contracts/spec/worker.ts";
 import { registerAnimationTheme, setAnimationTickRate } from "../framework/compiler/animation.ts";
 import { compileClasses, generateStylesModule, suspectClassLiteral, unknownUtilities } from "../framework/compiler/tailwind.ts";
 import { bakeAtlases } from "../framework/compiler/bake-font.ts";
@@ -90,6 +97,7 @@ const args = process.argv.slice(2);
 let extraChars = "";
 let regularFontPath: string | undefined;
 let boldFontPath: string | undefined;
+let monoFontPath: string | undefined;
 let appArg = "";
 let frameworkFlag: string | undefined;
 let planPath: string | undefined;
@@ -98,14 +106,16 @@ let hzFlag: number | undefined;
 let projectRoot = process.cwd();
 let inputsFile: string | undefined;
 let strictClasses = false;
+const layerFlags: string[] = [];
 const buildInputs = new BuildInputs();
 for (const a of args) {
   if (a.startsWith("--extra-chars=")) extraChars = a.slice("--extra-chars=".length);
   else if (a.startsWith("--font-regular=")) regularFontPath = resolvePath(a.slice("--font-regular=".length));
   else if (a.startsWith("--font-bold=")) boldFontPath = resolvePath(a.slice("--font-bold=".length));
+  else if (a.startsWith("--font-mono=")) monoFontPath = resolvePath(a.slice("--font-mono=".length));
   else if (a.startsWith("--framework=")) frameworkFlag = a.slice("--framework=".length);
   else if (a === "--config" || a.startsWith("--config=") || a === "--no-config") {
-    throw new Error("PocketJS build: application configuration belongs in pocket.json; --config and --no-config were removed");
+    throw new Error("PocketJS build: application configuration belongs in pocket.app.json; --config and --no-config were removed");
   }
   else if (a.startsWith("--plan=")) planPath = resolvePath(a.slice("--plan=".length));
   else if (a.startsWith("--project-root=")) projectRoot = resolvePath(a.slice("--project-root=".length));
@@ -114,6 +124,7 @@ for (const a of args) {
   else if (a.startsWith("--hz=")) hzFlag = Number(a.slice("--hz=".length));
   else if (a.startsWith("--inputs-file=")) inputsFile = resolvePath(a.slice("--inputs-file=".length));
   else if (a === "--strict-classes") strictClasses = true;
+  else if (a.startsWith("--layer=")) layerFlags.push(resolvePath(a.slice("--layer=".length)));
   else if (!a.startsWith("-")) appArg = a;
 }
 
@@ -133,7 +144,7 @@ if (planPath) {
   // Model lowering reads the application's manifest before transform caching.
   // A frozen plan must reject a later change to that compiler configuration.
   const model = modelConfiguration(appArg);
-  const currentApp = model.directory ? (await Bun.file(join(model.directory, "pocket.json")).json()).app ?? {} : {};
+  const currentApp = model.directory ? (await Bun.file(join(model.directory, "pocket.app.json")).json()).app ?? {} : {};
   if ((currentApp.aot === true) !== (buildPlan.app.aot === true)
     || model.mode !== (buildPlan.app.model ?? "rust")
     || model.recursionLimit !== (buildPlan.app.recursionLimit ?? 256)
@@ -152,9 +163,17 @@ buildInputs.optional(join(projectRoot, "tsconfig.json"));
 // The public compiler passes a frozen plan. Low-level source builds read the
 // matching application manifest so they bake the same application theme.
 if (!buildPlan) modelConfiguration(requestedEntry);
-const appContent = buildPlan ? buildPlan.app : sourceAppContent(requestedEntry, {
+let appProjectRoot = projectRoot;
+const sourceContent = buildPlan ? undefined : sourceAppContent(requestedEntry, {
   frameworkRoot: ROOT, projectRoot, onRead: path => buildInputs.add(path),
+  onAppRoot: path => { appProjectRoot = path; },
 });
+const appContent = buildPlan ? buildPlan.app : sourceContent!;
+/** The worker domain: the frozen plan's, or the source manifest's with
+ *  "host" channel sizes at the floor every host holds. */
+const workerDeclaration = buildPlan
+  ? buildPlan.domains?.worker
+  : sourceContent?.domains?.worker && resolveWorkerChannels(sourceContent.domains.worker);
 if (appContent.theme !== undefined) {
   const diagnostics: ContractDiagnostic[] = [];
   validateSchema(appContent.theme, animationThemeSchema, "/app/theme", diagnostics);
@@ -162,7 +181,7 @@ if (appContent.theme !== undefined) {
 }
 const framework: PocketFramework = frameworkFlag
   ? parseFramework(frameworkFlag, "--framework")
-  : parseFramework(appContent.framework, buildPlan ? "ResolvedBuildPlan" : "pocket.json");
+  : parseFramework(appContent.framework, buildPlan ? "ResolvedBuildPlan" : "pocket.app.json");
 const frameworkConfig = FRAMEWORKS[framework];
 const entry = frameworkVariantPath(requestedEntry, framework);
 const appName = buildPlan?.app.output ?? sourceOutputName(requestedEntry, ROOT);
@@ -217,7 +236,7 @@ function resolveImport(fromFile: string, spec: string): string | null {
     const exported = packagePath(spec, framework);
     return exported && /\.tsx?$/.test(exported) ? exported : null;
   }
-  if (!spec.startsWith("./") && !spec.startsWith("../") && !spec.startsWith("/")) return null; // external bare
+  if (!spec.startsWith("./") && !spec.startsWith("../") && !spec.startsWith("/")) return resolveSourcePackage(fromFile, spec);
   const model = framework === "solid" ? resolveSolidAotModel(fromFile, spec, entry) : undefined;
   if (model) return model.endsWith(".d.ts") ? null : model;
   let resolved: string;
@@ -227,6 +246,26 @@ function resolveImport(fromFile: string, spec: string): string | null {
     return null;
   }
   return (/\.tsx?$/.test(resolved) || resolved.endsWith(".vue")) && !resolved.endsWith(".d.ts") ? frameworkVariantPath(resolved, framework) : null;
+}
+
+/** A bare specifier that resolves to TypeScript source outside `node_modules`:
+ *  a package linked from its source tree, such as a product's guest modules.
+ *  Pass 1 walks it like a relative import, so its class strings and glyphs are
+ *  compiled. A package installed under `node_modules` ships built JavaScript
+ *  and stays external to pass 1. */
+function resolveSourcePackage(fromFile: string, spec: string): string | null {
+  let resolved: string;
+  try {
+    resolved = Bun.resolveSync(spec, dirname(fromFile));
+  } catch {
+    return null;
+  }
+  if (!/\.tsx?$/.test(resolved) || resolved.endsWith(".d.ts")) return null;
+  // A linked package resolves through `node_modules`; its real path says
+  // where the source lives.
+  const real = realpathSync(resolved);
+  if (real.replace(/\\/g, "/").split("/").includes("node_modules")) return null;
+  return frameworkVariantPath(real, framework);
 }
 
 const classStrings: string[] = [];
@@ -240,9 +279,9 @@ async function walk(file: string): Promise<void> {
   visited.add(file);
   // Never scan the compiled-styles module: its literals ARE the compiled
   // class names, and collecting them again would feed the compiler its own
-  // output [R]. Other generated modules (e.g. the launcher's registry) are
-  // ordinary app data whose literals — cover asset paths, title glyphs —
-  // pass 1 must see like any hand-written module's.
+  // output [R]. Other generated modules (an asset registry, for example) are
+  // ordinary app data whose literals — asset paths, title glyphs — pass 1
+  // must see like any hand-written module's.
   if (file.replace(/\\/g, "/").endsWith("/styles.generated.ts")) return;
   const src = await Bun.file(file).text();
   buildInputs.add(file);
@@ -268,6 +307,10 @@ async function walk(file: string): Promise<void> {
 // walked here so pass 1 compiles its classes and glyphs, and imported ahead
 // of the app's entry in pass 2 so it registers before the app mounts.
 const systemLayers: string[] = [];
+for (const layer of layerFlags) {
+  if (!existsSync(layer)) throw new Error(`PocketJS build: --layer names ${layer}, which is not a file`);
+  systemLayers.push(layer);
+}
 if (framework === "solid" && buildPlan?.features["system.agent"] === true) {
   systemLayers.push(join(ROOT, "framework/src/agent-layer.tsx"));
 }
@@ -348,6 +391,7 @@ const atlases = await bakeAtlases({
   rasterDensity,
   regularTtf: regularFontPath,
   boldTtf: boldFontPath,
+  monoTtf: monoFontPath,
   onRead: path => buildInputs.add(path),
   fallbackTtfs,
 });
@@ -381,7 +425,7 @@ const spriteMeta: Record<string, SpriteMeta> = existsSync(spriteManifestPath)
   : {};
 // Optional per-app static-image meta: <appDir>/images.json maps an asset
 // name to { linear?, psm? }. `linear` bakes IMG_FLAG_LINEAR so the core
-// samples it bilinearly (rotated/scaled art — the launcher's covers); psm 2
+// samples it bilinearly (rotated or scaled art); psm 2
 // selects PSM_4444. Absent file or name = today's defaults, byte-identical.
 interface ImageMeta {
   linear?: boolean;
@@ -525,6 +569,8 @@ const result = await Bun.build({
     __POCKET_TARGET__: JSON.stringify(buildPlan?.target.id ?? ""),
     __POCKET_HOST_ABI__: String(buildPlan?.target.hostAbi ?? POCKET_BINDING_GENERATION),
     __POCKET_FEATURES__: JSON.stringify(buildPlan?.features ?? {}),
+    __POCKET_DOMAIN__: '"ui"',
+    __POCKET_WORKER_DECLARATION__: JSON.stringify(workerDeclaration ?? null),
     // The modality and presentation the plan resolved; the runtime module
     // (@pocketjs/framework/modality) falls back to the portable PSP shape
     // when a bundle is built without a plan.
@@ -534,12 +580,15 @@ const result = await Bun.build({
     // a bundle built without a plan animates as a composited target.
     __POCKET_ANIMATION__: JSON.stringify(buildPlan?.animation ?? "composited"),
     __POCKET_PIXEL_RATIO__: String(rasterDensity),
+    // The largest response body a worker http request may ask for on the
+    // target (contracts/spec/profile.ts worker.http).
+    __POCKET_HTTP_RESPONSE_BYTES__: String(profileResponseBytes(buildPlan?.profile ?? {})),
     __POCKET_TICK_HZ__: String(tickHz),
     ...(framework === "vue-vapor"
       ? { document: "globalThis.__pocketDocument" }
       : {}),
   },
-  minify: false,
+  minify: process.env.POCKETJS_MINIFY === "1",
   metafile: true,
   sourcemap: "none",
   plugins: [jsxPlugin(framework, {
@@ -554,6 +603,11 @@ if (!result.success) {
   process.exit(1);
 }
 const bundle = result.outputs.find((o) => o.path.endsWith(".js"));
+if (workerDeclaration) {
+  const worker = await buildWorker({ declaration: workerDeclaration, projectRoot: appProjectRoot, outdir: DIST, output: outName });
+  buildInputs.metafile(worker.metafile);
+  console.log(`  worker: ${DIST}${outName}.worker.js`);
+}
 if (inputsFile) {
   buildInputs.metafile(result.metafile);
   await buildInputs.compiler([join(ROOT, "tools/build.ts"), join(ROOT, "tools/pocket.ts")], ROOT);

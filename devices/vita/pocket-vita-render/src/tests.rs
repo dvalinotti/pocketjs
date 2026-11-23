@@ -59,6 +59,7 @@ unsafe impl Device for Mock {
         &mut self,
         vertices: &[Vertex],
         commands: &[Command],
+        _target: (i32, i32),
         clear: Option<u32>,
     ) -> Result<u32, RenderError> {
         let mut s = self.0.borrow_mut();
@@ -517,9 +518,9 @@ fn coordinator_error_before_submission_closes_external_scene_without_swap() {
 fn registered_display_queues_the_swap_and_completion_never_drains_the_display_queue() {
     use pocket_drivers::{DisplayOutput, DisplayRole};
     let (renderer, device) = fresh();
-    let shared = Rc::new(RefCell::new(renderer));
-    let mut registered = registered::SharedRenderer(shared.clone());
-    let mut display = registered::GxmDisplay::new(shared.clone(), DisplayRole::Primary);
+    let shared = pocket_drivers::target::RendererCell::new(renderer);
+    let mut registered: registered::SharedRenderer<Mock> = shared.registration().unwrap();
+    let mut display = registered::GxmDisplay::new(&shared, DisplayRole::Primary).unwrap();
     assert!(display.descriptor().queued_flush);
     let res = Resources::new();
     let words = image();
@@ -528,7 +529,7 @@ fn registered_display_queues_the_swap_and_completion_never_drains_the_display_qu
     for _ in 0..2 {
         // The program opens the scene; this waits for the previous scene's
         // GPU work before vita2d reuses its vertex pool.
-        shared.borrow_mut().begin_frame(0).unwrap();
+        shared.borrow_mut().unwrap().begin_frame(0).unwrap();
         // Coordinator completion of the previous frame, before acquire.
         if let Some((submission, token)) = previous.take() {
             registered.wait(&submission).unwrap();
@@ -568,5 +569,55 @@ fn registered_display_queues_the_swap_and_completion_never_drains_the_display_qu
             "wait",
             "retire",
         ]
+    );
+}
+
+#[test]
+fn clip_state_changes_only_when_the_clip_does() {
+    let mut previous = None;
+    let layer = Clip {
+        x: 0,
+        y: 36,
+        w: 960,
+        h: 508,
+    };
+    let screen = Clip {
+        x: 0,
+        y: 0,
+        w: 960,
+        h: 544,
+    };
+    assert_eq!(
+        clip_change(&mut previous, layer, 960, 544),
+        ClipChange::Set(layer)
+    );
+    // A run of sprites under one clip sets it once.
+    for _ in 0..200 {
+        assert_eq!(
+            clip_change(&mut previous, layer, 960, 544),
+            ClipChange::Keep
+        );
+    }
+    assert_eq!(
+        clip_change(&mut previous, screen, 960, 544),
+        ClipChange::Disable
+    );
+    assert_eq!(
+        clip_change(&mut previous, screen, 960, 544),
+        ClipChange::Keep
+    );
+    let wider = Clip {
+        x: -4,
+        y: -4,
+        w: 970,
+        h: 560,
+    };
+    assert_eq!(
+        clip_change(&mut previous, wider, 960, 544),
+        ClipChange::Disable
+    );
+    assert_eq!(
+        clip_change(&mut previous, layer, 960, 544),
+        ClipChange::Set(layer)
     );
 }

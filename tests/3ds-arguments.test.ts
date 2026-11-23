@@ -5,6 +5,6 @@ test("unrecognized flags still go to cargo", () => {
   expect(parse3dsArguments(["--locked"], { workingDirectory: "/w" }).cargoArgs).toEqual(["--locked"]);
 });
 
-test("application configuration flags are refused in favour of pocket.json", () => {
-  expect(() => parse3dsArguments(["--config=app.json"], { workingDirectory: "/w" })).toThrow(/belongs in pocket.json/);
+test("application configuration flags are refused in favour of pocket.app.json", () => {
+  expect(() => parse3dsArguments(["--config=app.json"], { workingDirectory: "/w" })).toThrow(/belongs in pocket\.app\.json/);
 });

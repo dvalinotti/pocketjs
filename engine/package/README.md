@@ -1,5 +1,41 @@
 # pocket-package
 
+Readers and admission checks for PocketJS application packages, asset packs, and font archives.
+
+## Install
+
+```toml
+[dependencies]
+pocket-package = "0.16.0"
+pocket-drivers = "0.16.0"
+```
+
+## Example
+
+```rust
+use pocket_drivers::PackageSource;
+use pocket_package::source::MemorySource;
+
+// These bytes demonstrate the source API, not a valid .pocket container.
+let bytes = b"example bytes";
+let mut source = MemorySource(bytes.as_slice());
+let mut prefix = [0; 7];
+assert_eq!(source.range(0, &mut prefix).unwrap(), 7);
+assert_eq!(&prefix, b"example");
+```
+
+## Environment and compatibility
+
+Rust 1.93 or later. `no_std` with `alloc`; I/O is supplied through `pocket-drivers::PackageSource`.
+
+Use compiler-produced `.pocket` files for application delivery. Parsing alone does not prove admission: the runtime also checks the selected host contract hash, binding generation, capabilities and timing.
+
+Use matching PocketJS crate releases and compiler contracts. Application package
+format, binding generation, and DrawList version are checked at their respective
+boundaries; a Cargo version alone does not replace those checks.
+
+## Detailed contract
+
 Package readers enforce the container format, footer and variant hashes,
 selected target, binding generation and the program's expected profile hash.
 The expected profile hash comes from the program's build inputs.
@@ -26,6 +62,18 @@ source available for borrowed or range reads. **The C source ABI is unchanged**:
 its pointers carry no transferable ownership or static lifetime, so its bytes
 still copy into runtime-owned storage.
 
+**A source may state where one program lies in its bytes.**
+`PackageSource::sections` (the optional `sections` callback of
+`pocket_package_source_v1` in C) returns the byte ranges of the plan, the UI
+bundle, the pak and the optional bytecode and worker sections, with the binding
+generation the program was compiled for. `LoadedPackage::load` then parses no
+container and checks no container hash. It admits the plan against the host
+facts and applies the section checks of a package variant: NUL-terminated
+bundles, bytecode envelopes and a worker bundle that matches `domains.worker`.
+`package_hash` and `variant_hash` are zero. A host that stores programs in a
+container of its own implements this method; a source that returns `None` holds
+a `.pocket` container.
+
 Raw JS/pak embedders can use `embedded::encode`, which writes one container and
 its JavaScript terminator without a script-sized temporary buffer. Product
 builders should link their compiled `.pocket` into a `StaticMemorySource`
@@ -35,3 +83,11 @@ Package retention does not make a JavaScript ArrayBuffer immutable. Guest
 engines without a verified immutable-buffer API must still copy bytes exposed
 to JavaScript. Removing that copy would let guest writes mutate Rust-borrowed
 package data; it is separate from the source ownership optimization.
+
+## Documentation and license
+
+- [API reference](https://docs.rs/pocket-package)
+- [Source](https://github.com/pocket-nexus/pocketjs/tree/main/engine/package)
+- [PocketJS documentation](https://pocketjs.pocket.nexus/docs/)
+
+MIT. The published crate includes the copyright notice and full license in `LICENSE`.

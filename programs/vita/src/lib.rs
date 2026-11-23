@@ -1,5 +1,8 @@
 #![allow(static_mut_refs)]
 extern crate alloc;
+// The archive's symbol shells define the pocket_runtime_op and
+// pocket_runtime_supports_op the C guest calls, and the std host hooks.
+use pocket_archive as _;
 pub use pocket_vita_audio as audio;
 pub mod dbg;
 pub mod dev;
@@ -7,6 +10,7 @@ pub mod dev;
 mod dev_delivery;
 pub mod dev_protocol;
 pub mod devmenu;
+pub mod frame_timing;
 pub mod scene;
 pub mod service_bindings;
 pub use pocket_vita_input as input;

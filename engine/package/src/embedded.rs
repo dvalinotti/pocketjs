@@ -10,6 +10,8 @@ pub enum EncodeError {
     InvalidTarget,
     InvalidIdentity,
     InvalidJavaScript,
+    /// Section kinds are not strictly increasing.
+    InvalidSections,
     TooLarge,
     NoMemory,
 }
@@ -141,9 +143,95 @@ pub fn encode(package: EmbeddedPackage<'_>) -> Result<Vec<u8>, EncodeError> {
     Ok(bytes)
 }
 
+/// One variant of `target` holding `sections`, given in strictly increasing
+/// kind order with their payloads as stored, for fixtures and tools. The
+/// layout is `encode`'s with any section set.
+pub fn encode_sections(
+    target: &str,
+    host_abi: u32,
+    profile_hash: [u8; 32],
+    sections: &[(u32, &[u8])],
+) -> Result<Vec<u8>, EncodeError> {
+    if target.is_empty() || target.len() > POCKET_TARGET_MAX_BYTES || target.contains('\0') {
+        return Err(EncodeError::InvalidTarget);
+    }
+    if sections.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(EncodeError::InvalidSections);
+    }
+    let table = align(POCKET_HEADER_SIZE)?;
+    let strings = table + POCKET_VARIANT_SIZE;
+    let directory = align(strings + target.len())?;
+    let mut cursor = align(directory + sections.len() * POCKET_SECTION_SIZE)?;
+    let mut offsets = Vec::new();
+    offsets
+        .try_reserve_exact(sections.len())
+        .map_err(|_| EncodeError::NoMemory)?;
+    for (_, payload) in sections {
+        offsets.push(cursor);
+        cursor = align(
+            cursor
+                .checked_add(payload.len())
+                .ok_or(EncodeError::TooLarge)?,
+        )?;
+    }
+    let length = cursor
+        .checked_add(POCKET_FOOTER_SIZE)
+        .filter(|&n| n <= u32::MAX as usize)
+        .ok_or(EncodeError::TooLarge)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| EncodeError::NoMemory)?;
+    bytes.resize(length, 0);
+    write32(&mut bytes, 0, POCKET_MAGIC as usize);
+    write32(&mut bytes, 4, POCKET_VERSION as usize);
+    write32(&mut bytes, OFFSET_HEADER_VARIANT_COUNT, 1);
+    write32(&mut bytes, OFFSET_HEADER_STRING_TABLE_OFFSET, strings);
+    write32(&mut bytes, OFFSET_HEADER_STRING_TABLE_SIZE, target.len());
+    write32(&mut bytes, table + OFFSET_VARIANT_TARGET_OFFSET, strings);
+    write32(&mut bytes, table + OFFSET_VARIANT_TARGET_SIZE, target.len());
+    bytes[strings..strings + target.len()].copy_from_slice(target.as_bytes());
+    bytes[table + OFFSET_VARIANT_PROFILE_HASH..table + OFFSET_VARIANT_PROFILE_HASH + 32]
+        .copy_from_slice(&profile_hash);
+    write32(
+        &mut bytes,
+        table + OFFSET_VARIANT_HOST_ABI,
+        host_abi as usize,
+    );
+    write32(
+        &mut bytes,
+        table + OFFSET_VARIANT_SECTION_COUNT,
+        sections.len(),
+    );
+    write32(
+        &mut bytes,
+        table + OFFSET_VARIANT_SECTIONS_OFFSET,
+        directory,
+    );
+    let mut payloads = Vec::new();
+    payloads
+        .try_reserve_exact(sections.len())
+        .map_err(|_| EncodeError::NoMemory)?;
+    payloads.extend(sections.iter().map(|(_, payload)| *payload));
+    let hash = fnv1a64(&payloads);
+    bytes[table + OFFSET_VARIANT_HASH..table + OFFSET_VARIANT_HASH + 8]
+        .copy_from_slice(&hash.to_le_bytes());
+    for (i, ((kind, payload), offset)) in sections.iter().zip(offsets).enumerate() {
+        let entry = directory + i * POCKET_SECTION_SIZE;
+        write32(&mut bytes, entry + OFFSET_SECTION_KIND, *kind as usize);
+        write32(&mut bytes, entry + OFFSET_SECTION_OFFSET, offset);
+        write32(&mut bytes, entry + OFFSET_SECTION_SIZE, payload.len());
+        bytes[offset..offset + payload.len()].copy_from_slice(payload);
+    }
+    let hash = fnv1a64(&[&bytes[..cursor]]);
+    bytes[cursor..].copy_from_slice(&hash.to_le_bytes());
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admission::testing::{host, PLAN};
     use crate::source::{LoadedPackage, MemorySource};
     #[test]
     fn embedded_input_uses_normal_admission_and_keeps_one_terminator() {
@@ -154,7 +242,7 @@ mod tests {
                 host_abi: 1,
                 profile_hash: [0x11; 32],
                 identity: &identity,
-                plan: b"{}",
+                plan: PLAN,
                 code,
                 pak: &[],
             })
@@ -162,30 +250,19 @@ mod tests {
         let bytes = make(b"hello").unwrap();
         assert_eq!(bytes, make(b"hello\0").unwrap());
         assert_eq!(make(b"hello\0\0"), Err(EncodeError::InvalidJavaScript));
-        let package = LoadedPackage::load(
-            &mut MemorySource(&bytes),
-            "web",
-            1,
-            &[0x11; 32],
-            bytes.len(),
-        )
-        .unwrap();
+        let package =
+            LoadedPackage::load(&mut MemorySource(&bytes), &host(1, [0x11; 32]), bytes.len())
+                .unwrap();
         assert_eq!(package.javascript(), b"hello\0");
-        assert!(LoadedPackage::load(
-            &mut MemorySource(&bytes),
-            "web",
-            2,
-            &[0x11; 32],
-            bytes.len()
-        )
-        .is_err());
+        assert!(
+            LoadedPackage::load(&mut MemorySource(&bytes), &host(2, [0x11; 32]), bytes.len())
+                .is_err()
+        );
         let mut damaged = bytes;
         damaged[0] ^= 1;
         assert!(LoadedPackage::load(
             &mut MemorySource(&damaged),
-            "web",
-            1,
-            &[0x11; 32],
+            &host(1, [0x11; 32]),
             damaged.len()
         )
         .is_err());
@@ -203,7 +280,7 @@ mod tests {
                 host_abi: 7,
                 profile_hash: [0x55; 32],
                 identity: &identity,
-                plan: b"{}",
+                plan: PLAN,
                 code: b"test",
                 pak: &[],
             })
@@ -211,7 +288,8 @@ mod tests {
             let parsed = crate::Package::parse(&bytes, false).unwrap();
             assert_eq!(parsed.variant(0).unwrap().target, target);
             assert_eq!(parsed.variant(0).unwrap().profile_hash, [0x55; 32]);
-            crate::select_guest(&bytes, target, 7, &[0x55; 32], false).unwrap();
+            let guest = crate::select_guest(&bytes, &host(7, [0x55; 32]), false).unwrap();
+            assert_eq!(guest.target, target);
         }
         for target in ["", "nul\0id", &"a".repeat(65536)] {
             assert_eq!(

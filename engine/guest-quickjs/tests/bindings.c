@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #endif
 #include "pocket_guest_quickjs.h"
+#include "pocket_quickjs_abi.h"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <assert.h>
@@ -83,6 +84,27 @@ static void binding_generation(void) {
     }
   }
 }
+typedef struct {unsigned count;pocket_qjs_log_level levels[7];char messages[7][64];} log_capture;
+static void capture_log(void *context,pocket_qjs_log_level level,const uint8_t *message,size_t length) {
+  log_capture *capture=context;assert(capture->count<7&&length<sizeof capture->messages[0]);
+  capture->levels[capture->count]=level;if(length)memcpy(capture->messages[capture->count],message,length);capture->messages[capture->count][length]=0;capture->count++;
+}
+static void console_sink(void) {
+  pocket_runtime runtime={0};pocket_guest_environment env=environment();log_capture capture={0};
+  pocket_guest_quickjs *guest=pocket_guest_quickjs_create(POCKET_QJS_CANONICAL);
+  assert(pocket_guest_quickjs_set_log_hook(guest,capture_log,&capture)==0);
+  assert(pocket_guest_quickjs_vtable()->initialize(guest,&runtime,&env)==0);
+  assert(pocket_guest_quickjs_set_log_hook(guest,NULL,NULL)!=0);
+  eval(guest,&runtime,"if(console.log.name!=='log'||console.info.name!=='info'||console.warn.name!=='warn'||console.error.name!=='error'||console.debug.name!=='debug')throw Error('console function name')");
+  eval(guest,&runtime,"console.log('hello',17);console.info('info');console.warn('warn');console.error('error');console.debug('debug');console.log();console.log('\\ud800x')");
+  const pocket_qjs_log_level levels[]={POCKET_QJS_LOG,POCKET_QJS_INFO,POCKET_QJS_WARN,POCKET_QJS_ERROR,POCKET_QJS_DEBUG,POCKET_QJS_LOG,POCKET_QJS_LOG};
+  const char *messages[]={"hello 17","info","warn","error","debug","","\xef\xbf\xbd\xef\xbf\xbd\xef\xbf\xbdx"};
+  assert(POCKET_QJS_DEBUG<POCKET_QJS_LOG&&POCKET_QJS_LOG<POCKET_QJS_INFO&&POCKET_QJS_INFO<POCKET_QJS_WARN&&POCKET_QJS_WARN<POCKET_QJS_ERROR);
+  assert(capture.count==7);for(unsigned i=0;i<7;i++)assert(capture.levels[i]==levels[i]&&!strcmp(capture.messages[i],messages[i]));
+  static const uint8_t rejected[]="console.log('oom')";begin_scratch(1);assert(pocket_guest_quickjs_vtable()->evaluate(guest,&runtime,rejected,sizeof rejected)!=0);end_scratch(1,0,4);
+  eval(guest,&runtime,"globalThis.consoleRecovered=true");assert(capture.count==7);
+  pocket_guest_quickjs_destroy(guest);
+}
 static void canonical(void) {
   pocket_runtime runtime={0};pocket_guest_quickjs *guest=pocket_guest_quickjs_create(POCKET_QJS_CANONICAL);pocket_guest_environment env=environment();
   assert(pocket_guest_quickjs_vtable()->initialize(guest,&runtime,&env)==0);
@@ -114,11 +136,11 @@ static void attached_lifetime(void) {
     uint8_t *pak=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);assert(pak!=MAP_FAILED);pak[0]=1;pak[1]=2;pak[2]=3;
     JSRuntime *engine=JS_NewRuntime();JSContext *ctx=JS_NewContext(engine);pocket_runtime runtime={0};pocket_guest_environment env=environment();env.pak=pak;env.pak_length=3;
     pocket_guest_quickjs *guest=pocket_guest_quickjs_attach(ctx,(pocket_qjs_profile)profile);assert(pocket_guest_quickjs_vtable()->initialize(guest,&runtime,&env)==0);
-    eval(guest,&runtime,"globalThis.saved=Object.values(ui).find(v=>typeof v==='function');globalThis.savedPak=__pak;globalThis.savedView=new Uint8Array(__pak);if(!saved||savedView[2]!==3)throw Error('view')");pocket_guest_quickjs_destroy(guest);
+    eval(guest,&runtime,"globalThis.saved=Object.values(ui).find(v=>typeof v==='function');globalThis.savedPak=__pak;globalThis.savedView=new Uint8Array(__pak);globalThis.savedLog=console.log;if(!saved||savedView[2]!==3)throw Error('view')");pocket_guest_quickjs_destroy(guest);
     /* Shutdown detached __pak before its storage went away: retained views
      * read nothing instead of the unmapped page. */
     assert(munmap(pak,page)==0);
-    const char *source="let rejected=false;try{saved(0)}catch(e){rejected=true}if(!rejected||savedPak.byteLength!==0||savedPak.detached!==true||savedView.byteLength!==0||savedView[0]!==undefined||'ui' in globalThis||'__pak' in globalThis)throw new Error('lifetime')";
+    const char *source="let rejected=false;try{saved(0)}catch(e){rejected=true}savedLog('after');if(!rejected||savedPak.byteLength!==0||savedPak.detached!==true||savedView.byteLength!==0||savedView[0]!==undefined||'ui' in globalThis||'__pak' in globalThis||'console' in globalThis)throw new Error('lifetime')";
     JSValue result=JS_Eval(ctx,source,strlen(source),"test",JS_EVAL_TYPE_GLOBAL);assert(!JS_IsException(result));JS_FreeValue(ctx,result);JS_FreeContext(ctx);JS_FreeRuntime(engine);
   }
 }
@@ -141,36 +163,27 @@ static uint8_t *package_pointer(pocket_guest_quickjs *guest,size_t *length) {
   JSContext *ctx=pocket_guest_quickjs_context(guest);JSValue global=JS_GetGlobalObject(ctx),pak=JS_GetPropertyStr(ctx,global,"__pak");
   uint8_t *bytes=JS_GetArrayBuffer(ctx,length,pak);assert(bytes);JS_FreeValue(ctx,pak);JS_FreeValue(ctx,global);return bytes;
 }
-/* Canonical/IDF guests mount the package storage itself; the legacy profile
- * owns a copy that JS may write. The source page is read-only, so a borrowed
- * write that escapes the engine's immutable checks faults here. */
+/* Package storage is borrowed. The read-only page catches writes that escape immutable checks. */
 static void package_storage(void) {
   size_t page=(size_t)sysconf(_SC_PAGESIZE);uint8_t *source=mmap(NULL,page,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);assert(source!=MAP_FAILED);source[0]=1;source[1]=2;source[2]=3;assert(mprotect(source,page,PROT_READ)==0);
   for(int profile=POCKET_QJS_CANONICAL;profile<=POCKET_QJS_IDF;profile++) {
     pocket_runtime runtime={0};pocket_guest_environment env=environment();env.pak=source;env.pak_length=3;pocket_guest_quickjs *guest=pocket_guest_quickjs_create((pocket_qjs_profile)profile);assert(pocket_guest_quickjs_vtable()->initialize(guest,&runtime,&env)==0);
     size_t length=0;uint8_t *bytes=package_pointer(guest,&length);assert(length==3&&memcmp(bytes,source,3)==0);
-    if(profile==POCKET_QJS_LEGACY_C) {
-      assert(bytes!=source);
-      eval(guest,&runtime,"new Uint8Array(__pak)[0]=99;if(new Uint8Array(__pak)[0]!==99)throw Error('legacy copy')");
-    } else {
       assert(bytes==source);
       /* Only an engine that reports the immutable flag rejects writes; without
        * it a write would land in the source page, so none is attempted. */
       eval(guest,&runtime,"if(__pak.immutable===true){try{new Uint8Array(__pak)[0]=99}catch(e){};try{new DataView(__pak).setUint8(1,88)}catch(e){};let moved=false;try{__pak.transfer();moved=true}catch(e){};if(moved)throw Error('transfer')}if(__pak.byteLength!==3||new Uint8Array(__pak)[0]!==1)throw Error('borrowed bytes')");
-    }
     assert(source[0]==1&&source[1]==2&&source[2]==3);pocket_guest_quickjs_destroy(guest);
   }
   assert(munmap(source,page)==0);
 }
-/* Borrowed package bytes stay outside the guest heap limit; the legacy copy
- * must fit inside it. */
+/* Borrowed package bytes stay outside the guest heap limit. */
 static void package_outside_heap_limit(void) {
   size_t span=(size_t)4<<20;uint8_t *source=mmap(NULL,span,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);assert(source!=MAP_FAILED);source[span-1]=7;assert(mprotect(source,span,PROT_READ)==0);
   for(int profile=POCKET_QJS_CANONICAL;profile<=POCKET_QJS_IDF;profile++) {
     pocket_runtime runtime={0};pocket_guest_environment env=environment();env.pak=source;env.pak_length=span;env.heap_limit=span/2;pocket_guest_quickjs *guest=pocket_guest_quickjs_create((pocket_qjs_profile)profile);
     int32_t status=pocket_guest_quickjs_vtable()->initialize(guest,&runtime,&env);
-    if(profile==POCKET_QJS_LEGACY_C) assert(status!=0&&strstr(pocket_guest_quickjs_error(guest),"out of memory"));
-    else {assert(status==0);size_t length=0;assert(package_pointer(guest,&length)==source&&length==span);eval(guest,&runtime,"if(__pak.byteLength!==4194304||new Uint8Array(__pak)[4194303]!==7)throw Error('borrowed span')");}
+    {assert(status==0);size_t length=0;assert(package_pointer(guest,&length)==source&&length==span);eval(guest,&runtime,"if(__pak.byteLength!==4194304||new Uint8Array(__pak)[4194303]!==7)throw Error('borrowed span')");}
     pocket_guest_quickjs_destroy(guest);
   }
   assert(munmap(source,span)==0);
@@ -241,4 +254,30 @@ static void evaluation_source_lifetime(void) {
   }
   assert(munmap(source,span+page)==0);
 }
-int main(void){binding_generation();canonical();idf();attached_lifetime();extensible_records();package_storage();package_outside_heap_limit();package_terminal_nul();evaluation_source_lifetime();puts("generated QuickJS bindings: ok");return 0;}
+/* A package bytecode section runs when its envelope names the guest's engine
+ * ABI; another build's, or none, is UNSUPPORTED before anything runs. */
+static void bytecode(void) {
+  pocket_runtime runtime={0};pocket_guest_quickjs *guest=pocket_guest_quickjs_create(POCKET_QJS_CANONICAL);pocket_guest_environment env=environment();
+  assert(pocket_guest_quickjs_vtable()->initialize(guest,&runtime,&env)==0);
+  JSContext *ctx=pocket_guest_quickjs_context(guest);
+  const char *source="globalThis.__bytecode=6*7;";
+  JSValue compiled=JS_Eval(ctx,source,strlen(source),"app.js",JS_EVAL_TYPE_GLOBAL|JS_EVAL_FLAG_COMPILE_ONLY);assert(!JS_IsException(compiled));
+  size_t length=0;uint8_t *object=JS_WriteObject(ctx,&length,compiled,JS_WRITE_OBJ_BYTECODE);assert(object&&length);JS_FreeValue(ctx,compiled);
+  size_t total=POCKET_BYTECODE_HEADER_SIZE+length;uint8_t *section=calloc(1,total);assert(section);
+  const uint32_t words[4]={POCKET_BYTECODE_MAGIC,POCKET_BYTECODE_VERSION,POCKET_BYTECODE_HEADER_SIZE,POCKET_BYTECODE_FLAGS};
+  for(size_t i=0;i<4;i++)for(size_t b=0;b<4;b++)section[i*4+b]=(uint8_t)(words[i]>>(8*b));
+  uint8_t digest[32];memset(digest,0x5a,sizeof digest);memcpy(section+POCKET_BYTECODE_ENGINE_ABI_OFFSET,digest,sizeof digest);memcpy(section+POCKET_BYTECODE_HEADER_SIZE,object,length);js_free(ctx,object);
+  assert(pocket_guest_quickjs_vtable()->evaluate_bytecode(guest,&runtime,section,total)==POCKET_STATUS_UNSUPPORTED);
+  uint8_t other[32];memset(other,0xa5,sizeof other);pocket_guest_quickjs_set_engine_abi(guest,other);
+  assert(pocket_guest_quickjs_vtable()->evaluate_bytecode(guest,&runtime,section,total)==POCKET_STATUS_UNSUPPORTED);
+  eval(guest,&runtime,"if('__bytecode' in globalThis)throw Error('ran before the digest matched')");
+  pocket_guest_quickjs_set_engine_abi(guest,digest);
+  assert(pocket_guest_quickjs_vtable()->evaluate_bytecode(guest,&runtime,section,total)==0);
+  eval(guest,&runtime,"if(globalThis.__bytecode!==42)throw Error('bytecode did not run')");
+  /* A damaged object fails after the digest matched: an error, no fallback. */
+  section[POCKET_BYTECODE_HEADER_SIZE]^=0xff;
+  int32_t damaged=pocket_guest_quickjs_vtable()->evaluate_bytecode(guest,&runtime,section,total);
+  assert(damaged!=0&&damaged!=POCKET_STATUS_UNSUPPORTED);
+  free(section);pocket_guest_quickjs_destroy(guest);
+}
+int main(void){binding_generation();console_sink();canonical();idf();bytecode();attached_lifetime();extensible_records();package_storage();package_outside_heap_limit();package_terminal_nul();evaluation_source_lifetime();puts("generated QuickJS bindings: ok");return 0;}

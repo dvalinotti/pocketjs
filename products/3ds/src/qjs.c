@@ -6,22 +6,34 @@
 #include "fs.h"
 #include "instance.h"
 #include "launcher.h"
-#include "link.h"
+#include "link2_channel_qjs.h"
+#include "link2_guest.h"
+#include "link2_host.h"
 #include "media.h"
 #include "localmedia.h"
 #include "offload.h"
 #include "offload_coverage.h"
 #include "photos.h"
 #include "pocket_guest_quickjs.h"
+#include "pocket_profile.h"
+#include "pocket_qjs_program.h"
 #include "wifi.h"
+#include "worker.h"
+#include "pocket/worker.h"
+#include "pocket/worker_ui.h"
 
+#include <malloc.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "devserver.h"
+#include "devstats.h"
 #include "pocket_core.h"
 #include "quickjs.h"
 #include "svcwire.h"
+#include "push_timing.h"
+#ifdef POCKETJS_EXTENSION
+#include "pocket_extension.h"
+#endif
 
 #ifndef POCKETJS_TARGET_ID
 #error "POCKETJS_TARGET_ID must come from the verified ResolvedBuildPlan"
@@ -35,14 +47,6 @@
 /* contracts/spec/spec.ts FIXED_DT: the core steps at exactly 1/60 s, and this
  * host presents at the same rate, so the advertised simulation rate is 60. */
 #define POCKETJS_SIMULATION_HZ 60
-/* QuickJS recurses; the 3DS main thread's stack is set in main.c. */
-/* A QuickJS call frame is expensive and mounting a UI descends the tree, so
- * this budget is spent on JSX NESTING DEPTH rather than node count. 192 KiB
- * was not enough for an ordinary windowed app: opening one Pocket Shell
- * applet whose rows carried a wrapper view overflowed it mid-frame, and the
- * runtime rolled the whole guest back to last-good. The main thread's own
- * stack is 1 MiB (main.c) and this limit costs nothing until it is used. */
-#define POCKETJS_JS_STACK_SIZE (384 * 1024)
 
 typedef enum {
   HostMediaOpen,
@@ -72,6 +76,8 @@ typedef enum {
   HostDbgConnected,
   HostDbgPoll,
   HostDbgSend,
+  HostDbgLog,
+  HostDbgMemory,
   HostDbgShot,
   HostLinkStatus,
   HostLinkPair,
@@ -80,11 +86,17 @@ typedef enum {
   HostLinkInstall,
   HostLinkRemove,
   HostLinkPoll,
-  HostNetStart,
-  HostNetTake,
-  HostNetCancel,
-  HostNetPoll,
-  HostNetLastError,
+  HostChannelState,
+  HostChannelPoll,
+  HostChannelRequest,
+  HostChannelCancel,
+  HostChannelEmit,
+  HostChannelProgress,
+  HostChannelReply,
+  HostChannelRead,
+  HostChannelWrite,
+  HostChannelEnd,
+  HostChannelClose,
   HostWifiStatus,
   HostWifiSetEnabled,
   HostWifiConnect,
@@ -123,7 +135,13 @@ static JSRuntime *runtime;
 static JSContext *context;
 static JSValue global;
 static pocket_guest_quickjs *guest;
+/* The handle-based facade owns the native program and its runtime; this
+ * realm and guest_api are its host guest. */
+static PocketQjsProgram *program;
 static pocket_runtime *instance;
+/* compose ran for the boot in progress: a later failure is admission or
+ * guest initialization, not composition. */
+static bool composed;
 /* Wide enough for a message plus the frames QuickJS keeps for it. */
 static char last_error[1024];
 static char debug_poll_buffer[32 * 1024];
@@ -140,6 +158,10 @@ static uint8_t **boot_compiled;
 static size_t *boot_compiled_length;
 /* The mounted tree waits for the first qjs_frame to present it. */
 static bool first_present;
+static bool boot_has_worker;
+/* Mirrors the worker's channels into this realm; detached before either
+ * the worker core or this context is destroyed. */
+static pocket_worker_ui *ui_bridge;
 
 static void set_error(const char *message) {
   size_t length = message == NULL ? 0 : strlen(message);
@@ -176,7 +198,7 @@ static void take_exception(void) {
       size_t room = sizeof last_error - 1 - used - 1;
       size_t copy = stack_length < room ? stack_length : room;
       last_error[used] = ' ';
-      /* Flattened: the error travels as one line, over the dev wire and into
+      /* Flattened: the error travels as one line, over the link and into
        * error.txt alike. */
       for (size_t i = 0; i < copy; i += 1)
         last_error[used + 1 + i] = frames[i] == '\n' ? ' ' : frames[i];
@@ -226,38 +248,28 @@ static void free_text(JSContext *ctx, const char *text) {
     JS_FreeCString(ctx, text);
 }
 
-/* Native typed-array access bypasses script getters and retains the backing
- * allocation until the synchronous product service has consumed the slice. */
-static int argument_bytes(JSContext *ctx, int argc, JSValueConst *argv,
-                          int index, const uint8_t **bytes, size_t *length,
-                          JSValue *lease) {
-  if (index >= argc)
-    return 0;
-  size_t size = 0;
-  uint8_t *data = JS_GetArrayBuffer(ctx, &size, argv[index]);
-  if (data) {
-    *lease = JS_DupValue(ctx, argv[index]);
-    *bytes = data;
-    *length = size;
-    return 1;
+// ---------------------------------------------------------------------------
+// link.channel
+// ---------------------------------------------------------------------------
+
+/* The bindings are link2_channel_qjs.c, which the host tests compile too. */
+static JSValue channel_operation(JSContext *ctx, int argc, JSValueConst *argv, HostOperation operation) {
+  Link2QjsOperation call;
+  switch (operation) {
+  case HostChannelState: call = LINK2_QJS_STATE; break;
+  case HostChannelPoll: call = LINK2_QJS_POLL; break;
+  case HostChannelRequest: call = LINK2_QJS_REQUEST; break;
+  case HostChannelCancel: call = LINK2_QJS_CANCEL; break;
+  case HostChannelEmit: call = LINK2_QJS_EMIT; break;
+  case HostChannelProgress: call = LINK2_QJS_PROGRESS; break;
+  case HostChannelReply: call = LINK2_QJS_REPLY; break;
+  case HostChannelRead: call = LINK2_QJS_READ; break;
+  case HostChannelWrite: call = LINK2_QJS_WRITE; break;
+  case HostChannelEnd: call = LINK2_QJS_END; break;
+  case HostChannelClose: call = LINK2_QJS_CLOSE; break;
+  default: return JS_UNDEFINED;
   }
-  JS_FreeValue(ctx, JS_GetException(ctx));
-  size_t offset = 0, view_length = 0, element = 0;
-  JSValue buffer =
-      JS_GetTypedArrayBuffer(ctx, argv[index], &offset, &view_length, &element);
-  if (JS_IsException(buffer)) {
-    JS_FreeValue(ctx, JS_GetException(ctx));
-    return 0;
-  }
-  data = JS_GetArrayBuffer(ctx, &size, buffer);
-  if (!data || offset > size || view_length > size - offset) {
-    JS_FreeValue(ctx, buffer);
-    return 0;
-  }
-  *lease = buffer;
-  *bytes = data + offset;
-  *length = view_length;
-  return 1;
+  return link2_channel_qjs(ctx, link2_host_client(), link2_host_channel(), call, argc, argv, debug_poll_buffer, sizeof debug_poll_buffer);
 }
 
 // ---------------------------------------------------------------------------
@@ -347,14 +359,16 @@ static JSValue host_operation(JSContext *ctx, JSValueConst this_value, int argc,
     return JS_UNDEFINED;
 #endif
   case HostDebugFrames:
-    return JS_NewString(ctx, devserver_debug_frames());
+    return JS_NewString(ctx, devstats_frames());
+  /* DevTools reaches the shim over the link's stream
+   * (docs/POCKET-LINK.md §6.3). The shim asks `active` once as it installs,
+   * which is how the program learns this guest has one. */
   case HostDbgActive:
-    return JS_NewBool(ctx, devserver_active());
+    return JS_NewBool(ctx, link2_host_devtools_active());
   case HostDbgConnected:
-    return JS_NewBool(ctx, devserver_connected());
+    return JS_NewBool(ctx, link2_host_devtools_listening());
   case HostDbgPoll: {
-    size_t length =
-        devserver_recv_ctrl(debug_poll_buffer, sizeof debug_poll_buffer);
+    size_t length = link2_host_devtools_poll(debug_poll_buffer, sizeof debug_poll_buffer);
     return length == 0 ? JS_UNDEFINED
                        : JS_NewStringLen(ctx, debug_poll_buffer, length);
   }
@@ -363,10 +377,75 @@ static JSValue host_operation(JSContext *ctx, JSValueConst this_value, int argc,
       return JS_UNDEFINED;
     text = JS_ToCStringLen2(ctx, &text_length, argv[0], 0);
     if (text != NULL) {
-      devserver_send_ctrl(text, text_length);
+      link2_host_devtools_send(text, text_length);
       JS_FreeCString(ctx, text);
+    } else {
+      JS_FreeValue(ctx, JS_GetException(ctx));
     }
     return JS_UNDEFINED;
+  /* A console line of the guest, for runtime.logs: it travels as a `log`
+   * event whether a DevTools panel listens or not. */
+  case HostDbgLog: {
+    if (argc < 2)
+      return JS_UNDEFINED;
+    const char *level = JS_ToCString(ctx, argv[0]);
+    text = JS_ToCStringLen2(ctx, &text_length, argv[1], 0);
+    /* A value that does not convert leaves no exception behind this call. */
+    if (level == NULL || text == NULL)
+      JS_FreeValue(ctx, JS_GetException(ctx));
+    if (level != NULL && text != NULL)
+      link2_host_report_guest_log(level, text, text_length);
+    if (level != NULL)
+      JS_FreeCString(ctx, level);
+    if (text != NULL)
+      JS_FreeCString(ctx, text);
+    return JS_UNDEFINED;
+  }
+  /* The process's memory, for a soak: newlib's heap in use and free, and the
+   * linear heap's free bytes. */
+  case HostDbgMemory: {
+    struct mallinfo heap = mallinfo();
+    char memory[360];
+    uint32_t pumps = 0, pump_mean = 0, pump_max = 0;
+    link2_host_pump_cost(&pumps, &pump_mean, &pump_max);
+    /* The guest's own heap as QuickJS counts it. With a true argument the
+     * cycle collector runs first and both figures are given: what falls
+     * between them was garbage waiting for a collection, not a leak. */
+    JSMemoryUsage usage;
+    int32_t detail = 0;
+    if (argc > 0 && JS_IsNumber(argv[0])) JS_ToInt32(ctx, &detail, argv[0]);
+    if (detail == 2) {
+      /* What the guest's heap holds by kind, after a collection: which kind
+       * grows says where a growth lives (strings, atoms, shapes, objects). */
+      JS_RunGC(JS_GetRuntime(ctx));
+      JS_ComputeMemoryUsage(JS_GetRuntime(ctx), &usage);
+      snprintf(memory, sizeof memory,
+               "{\"js\":%lu,\"used\":%lu,\"obj\":[%lu,%lu],\"prop\":[%lu,%lu],\"shape\":[%lu,%lu],\"str\":[%lu,%lu],\"atom\":[%lu,%lu],"
+               "\"func\":[%lu,%lu],\"array\":[%lu,%lu],\"binary\":[%lu,%lu]}",
+               (unsigned long)usage.malloc_size, (unsigned long)usage.memory_used_size,
+               (unsigned long)usage.obj_count, (unsigned long)usage.obj_size, (unsigned long)usage.prop_count, (unsigned long)usage.prop_size,
+               (unsigned long)usage.shape_count, (unsigned long)usage.shape_size, (unsigned long)usage.str_count, (unsigned long)usage.str_size,
+               (unsigned long)usage.atom_count, (unsigned long)usage.atom_size, (unsigned long)usage.js_func_count, (unsigned long)usage.js_func_size,
+               (unsigned long)usage.array_count, (unsigned long)usage.fast_array_elements, (unsigned long)usage.binary_object_count, (unsigned long)usage.binary_object_size);
+      return JS_NewString(ctx, memory);
+    }
+    JS_ComputeMemoryUsage(JS_GetRuntime(ctx), &usage);
+    unsigned long js = (unsigned long)usage.malloc_size, js_objects = (unsigned long)usage.obj_count;
+    unsigned long js_collected = js, js_objects_collected = js_objects;
+    if (argc > 0 && JS_ToBool(ctx, argv[0])) {
+      JS_RunGC(JS_GetRuntime(ctx));
+      JS_ComputeMemoryUsage(JS_GetRuntime(ctx), &usage);
+      js_collected = (unsigned long)usage.malloc_size;
+      js_objects_collected = (unsigned long)usage.obj_count;
+      heap = mallinfo();
+    }
+    snprintf(memory, sizeof memory,
+             "{\"heapUsed\":%lu,\"heapFree\":%lu,\"heapArena\":%lu,\"linearFree\":%lu,\"pumps\":%lu,\"pumpUs\":%lu,\"pumpMaxUs\":%lu,"
+             "\"js\":%lu,\"jsObjects\":%lu,\"jsAfterGc\":%lu,\"jsObjectsAfterGc\":%lu}",
+             (unsigned long)heap.uordblks, (unsigned long)heap.fordblks, (unsigned long)heap.arena, (unsigned long)linearSpaceFree(),
+             (unsigned long)pumps, (unsigned long)pump_mean, (unsigned long)pump_max, js, js_objects, js_collected, js_objects_collected);
+    return JS_NewString(ctx, memory);
+  }
   case HostOffloadCoverage: {
     if (coverage_used || argc < 4 || !JS_IsString(argv[0]))
       return JS_NewInt32(ctx, -1);
@@ -443,9 +522,9 @@ static JSValue host_operation(JSContext *ctx, JSValueConst this_value, int argc,
                   : JS_UNDEFINED;
   }
   case HostDbgShot:
-    return JS_NewBool(ctx, devserver_request_screenshot());
+    return JS_NewBool(ctx, link2_host_request_screenshot());
   case HostLinkStatus:
-    return JS_NewString(ctx, link_status_json());
+    return JS_NewString(ctx, link2_guest_status_json());
   case HostLinkPair:
   case HostLinkForget:
   case HostLinkInstall:
@@ -457,54 +536,40 @@ static JSValue host_operation(JSContext *ctx, JSValueConst this_value, int argc,
     if (text == NULL)
       return is_bool ? JS_FALSE : JS_NewInt32(ctx, -1);
     JSValue result;
+    /* Pairing is written at the first install (docs/POCKET-LINK.md §3):
+     * `pair` stays for packages that call it and starts nothing. */
     if (magic == HostLinkPair)
-      result = JS_NewBool(ctx, link_pair(text, text_length));
+      result = JS_FALSE;
     else if (magic == HostLinkForget)
-      result = JS_NewBool(ctx, link_forget(text));
+      result = JS_NewBool(ctx, link2_guest_forget(text));
     else if (magic == HostLinkRemove)
-      result = JS_NewBool(ctx, link_remove(text, text_length));
+      result = JS_NewBool(ctx, link2_guest_remove(text, text_length));
     else
-      result = JS_NewInt32(ctx, link_install(text, text_length));
+      result = JS_NewInt32(ctx, link2_guest_install(text, text_length));
     JS_FreeCString(ctx, text);
     return result;
   }
   case HostLinkCatalog:
-    return JS_NewInt32(ctx, link_catalog());
-  case HostLinkPoll:
-  case HostNetPoll: {
-    const char *batch = magic == HostLinkPoll ? link_poll() : link_net_poll();
+    return JS_NewInt32(ctx, link2_guest_catalog());
+  case HostLinkPoll: {
+    const char *batch = link2_guest_poll();
     return batch == NULL ? JS_UNDEFINED : JS_NewString(ctx, batch);
   }
-  case HostNetStart: {
-    if (argc < 1 || !JS_IsString(argv[0]))
-      return JS_NewInt32(ctx, -1);
-    text = JS_ToCStringLen2(ctx, &text_length, argv[0], 0);
-    if (text == NULL)
-      return JS_NewInt32(ctx, -1);
-    /* Borrowed after the string conversion (which may allocate) and used
-     * before anything else can run JS: start() copies the body. */
-    if (!argument_bytes(ctx, argc, argv, 1, &bytes, &byte_length, &lease)) {
-      bytes = NULL;
-      byte_length = 0;
-    }
-    int32_t handle = link_net_start(text, text_length, bytes, byte_length);
-    JS_FreeValue(ctx, lease);
-    JS_FreeCString(ctx, text);
-    return JS_NewInt32(ctx, handle);
-  }
-  case HostNetTake: {
-    int32_t handle = argument_int(ctx, argc, argv, 0);
-    if (!argument_bytes(ctx, argc, argv, 1, &bytes, &byte_length, &lease))
-      return JS_NewInt32(ctx, -1);
-    int32_t count = link_net_take(handle, (uint8_t *)bytes, byte_length);
-    JS_FreeValue(ctx, lease);
-    return JS_NewInt32(ctx, count);
-  }
-  case HostNetCancel:
-    link_net_cancel(argument_int(ctx, argc, argv, 0));
-    return JS_UNDEFINED;
-  case HostNetLastError:
-    return JS_NewString(ctx, link_net_last_error());
+  /* `link.channel`: the running applet's channel to its daemon
+   * (docs/POCKET-LINK.md §7.3). The client keeps the ids, the windows and the
+   * per-frame budgets; these calls move whole JSON objects and byte chunks. */
+  case HostChannelState:
+  case HostChannelPoll:
+  case HostChannelRequest:
+  case HostChannelCancel:
+  case HostChannelEmit:
+  case HostChannelProgress:
+  case HostChannelReply:
+  case HostChannelRead:
+  case HostChannelWrite:
+  case HostChannelEnd:
+  case HostChannelClose:
+    return channel_operation(ctx, argc, argv, (HostOperation)magic);
   case HostWifiStatus:
     return JS_NewString(ctx, wifi_status_json());
   case HostWifiSetEnabled:
@@ -662,7 +727,26 @@ static void add_operation(JSValueConst object, const char *name, int arity,
                                          (int)operation));
 }
 
-static void install_host(void) {
+/* The worker owns the bound filesystem for worker packages. These callbacks
+ * use their argument context and never touch the UI realm's global values. */
+static int32_t mount_worker_services(JSContext *ctx) {
+  if (!fs_bound()) return POCKET_WORKER_OK;
+  const char *names[]={"read","write","remove","list","stat","mkdir","rename","usage","lastError"};
+  const int arities[]={3,3,2,2,1,1,2,0,0};
+  const HostOperation operations[]={HostFsRead,HostFsWrite,HostFsRemove,HostFsList,HostFsStat,HostFsMkdir,HostFsRename,HostFsUsage,HostFsLastError};
+  JSValue fs=JS_NewObject(ctx),root=JS_GetGlobalObject(ctx);
+  if (JS_IsException(fs)) { JS_FreeValue(ctx,root); return POCKET_WORKER_FAILED; }
+  for (size_t i=0;i<sizeof names/sizeof names[0];++i) {
+    JSValue fn=JS_NewCFunctionMagic(ctx,host_operation,names[i],arities[i],JS_CFUNC_generic_magic,operations[i]);
+    if (JS_IsException(fn) || JS_SetPropertyStr(ctx,fs,names[i],fn)<0) {
+      JS_FreeValue(ctx,fs);JS_FreeValue(ctx,root);return POCKET_WORKER_FAILED;
+    }
+  }
+  int result=JS_SetPropertyStr(ctx,root,"fs",fs);JS_FreeValue(ctx,root);
+  return result<0?POCKET_WORKER_FAILED:POCKET_WORKER_OK;
+}
+
+static int32_t install_host(void) {
 #ifdef POCKETJS_MEDIA
   JSValue media = JS_NewObject(context);
   add_operation(media, "open", 3, HostMediaOpen);
@@ -703,6 +787,8 @@ static void install_host(void) {
   add_operation(ui, "__dbgConnected", 0, HostDbgConnected);
   add_operation(ui, "__dbgPoll", 0, HostDbgPoll);
   add_operation(ui, "__dbgSend", 1, HostDbgSend);
+  add_operation(ui, "__dbgLog", 2, HostDbgLog);
+  add_operation(ui, "__dbgMemory", 0, HostDbgMemory);
   add_operation(ui, "__dbgShot", 0, HostDbgShot);
   JS_FreeValue(context, ui);
 
@@ -714,15 +800,33 @@ static void install_host(void) {
   add_operation(link, "install", 1, HostLinkInstall);
   add_operation(link, "remove", 1, HostLinkRemove);
   add_operation(link, "poll", 0, HostLinkPoll);
+  /* Only a guest that declared "link.channel" has its applet channel. */
+  if (link2_host_channel_declared()) {
+    JSValue channel = JS_NewObject(context);
+    add_operation(channel, "state", 0, HostChannelState);
+    add_operation(channel, "poll", 0, HostChannelPoll);
+    add_operation(channel, "request", 2, HostChannelRequest);
+    add_operation(channel, "cancel", 1, HostChannelCancel);
+    add_operation(channel, "emit", 2, HostChannelEmit);
+    add_operation(channel, "progress", 2, HostChannelProgress);
+    add_operation(channel, "reply", 3, HostChannelReply);
+    add_operation(channel, "read", 2, HostChannelRead);
+    add_operation(channel, "write", 2, HostChannelWrite);
+    add_operation(channel, "end", 1, HostChannelEnd);
+    add_operation(channel, "close", 1, HostChannelClose);
+    JS_SetPropertyStr(context, link, "channel", channel);
+  }
   JS_SetPropertyStr(context, global, "link", link);
 
-  JSValue net = JS_NewObject(context);
-  add_operation(net, "start", 2, HostNetStart);
-  add_operation(net, "take", 2, HostNetTake);
-  add_operation(net, "cancel", 1, HostNetCancel);
-  add_operation(net, "poll", 0, HostNetPoll);
-  add_operation(net, "lastError", 0, HostNetLastError);
-  JS_SetPropertyStr(context, global, "net", net);
+  /* The worker declared its channels during bootstrap, before this realm
+   * evaluates its bundle. */
+  if (boot_has_worker) {
+    ui_bridge = pocket_worker_ui_attach(context, pocket_3ds_worker_core());
+    if (!ui_bridge) {
+      set_error("worker channel bridge attachment failed");
+      return POCKET_WORKER_FAILED;
+    }
+  }
 
   JSValue wifi = JS_NewObject(context);
   add_operation(wifi, "status", 0, HostWifiStatus);
@@ -750,7 +854,7 @@ static void install_host(void) {
   }
 
   /* Only a guest that declared "data.fs" has a bound tree (main.c). */
-  if (fs_bound()) {
+  if (fs_bound() && !boot_has_worker) {
     JSValue fs = JS_NewObject(context);
     add_operation(fs, "read", 3, HostFsRead);
     add_operation(fs, "write", 3, HostFsWrite);
@@ -779,6 +883,11 @@ static void install_host(void) {
     add_operation(agent, "homeHint", 1, HostAgentHomeHint);
     JS_SetPropertyStr(context, global, "agent", agent);
   }
+#ifdef POCKETJS_EXTENSION
+  /* Only a guest that declared "system.extension" sees its global. */
+  if (pocket_extension_enabled()) pocket_extension_install(context, global);
+#endif
+  return 0;
 }
 
 /* The generated guest owns Ui metadata, pak storage and all numbered ops.
@@ -792,8 +901,7 @@ static int32_t guest_initialize(void *self, pocket_runtime *owner,
   if (status)
     return status;
   global = JS_GetGlobalObject(context);
-  install_host();
-  return 0;
+  return install_host();
 }
 /* The bundle into the realm: from the cached bytecode when the boot carries
  * it, else compiled once and handed back for bytecode.c. The generated
@@ -805,9 +913,11 @@ static int32_t guest_evaluate(void *self, pocket_runtime *owner,
       (boot_compiled == NULL || length == 0 || code[length - 1] != 0))
     return pocket_guest_quickjs_vtable()->evaluate(guest, owner, code, length);
   JSValue function;
+  uint64_t step = push_timing_now();
   if (boot_bytecode != NULL) {
     function = JS_ReadObject(context, boot_bytecode, boot_bytecode_length,
                              JS_READ_OBJ_BYTECODE);
+    push_timing_step("evaluate-read-bytecode", step, "%lu bytes", (unsigned long)boot_bytecode_length);
   } else {
     /* Package sections carry their terminal NUL; JS_Eval takes the length
      * without it. */
@@ -834,13 +944,18 @@ static int32_t guest_evaluate(void *self, pocket_runtime *owner,
     return -1;
   }
   /* JS_EvalFunction takes ownership of the function. */
+  step = push_timing_now();
   JSValue result = JS_EvalFunction(context, function);
+  push_timing_step("evaluate-top-level", step, "the bundle's top level");
   if (JS_IsException(result)) {
     take_exception();
     return -1;
   }
   JS_FreeValue(context, result);
-  return pocket_guest_quickjs_vtable()->collect(guest);
+  step = push_timing_now();
+  int32_t collected = pocket_guest_quickjs_vtable()->collect(guest);
+  push_timing_step("evaluate-collect", step, "-");
+  return collected;
 }
 static int32_t guest_frame(void *self, const pocket_guest_frame *frame) {
   (void)self;
@@ -859,7 +974,47 @@ static void guest_shutdown(void *self) {
 }
 static const pocket_guest_v1 guest_api = {sizeof guest_api, guest_evaluate,
                                           guest_frame,      guest_collect,
-                                          guest_shutdown,   guest_initialize};
+                                          guest_shutdown,   guest_initialize,
+                                          NULL};
+static const char *guest_error(void *self) {
+  (void)self;
+  return pocket_guest_quickjs_error(guest);
+}
+
+/* After the facade attaches guest_api and before Runtime admits the package:
+ * the 3DS drivers, then the worker, whose channels the guest's initialize
+ * mirrors into this realm. */
+static int32_t compose(void *context, pocket_runtime *runtime) {
+  const PocketRuntimePackage *package = context;
+  composed = true;
+  push_timing_step("compose-begin", push_timing_now(), "marker: the facade attached the guest; admission and assets follow compose");
+  instance = runtime;
+  if (!instance_attach(runtime)) {
+    set_error("3DS runtime composition failed");
+    return -1;
+  }
+  uint64_t step = push_timing_now();
+  if (package->guest.worker_javascript_length && !pocket_3ds_worker_start(
+        package->guest.worker_javascript, package->guest.worker_javascript_length, mount_worker_services)) {
+    set_error(pocket_3ds_worker_error());
+    return -1;
+  }
+  push_timing_step("compose-worker-start", step, "worker js %lu bytes", (unsigned long)package->guest.worker_javascript_length);
+  return 0;
+}
+/* Before the facade destroys the program: the bridge detaches before the
+ * worker core stops, and both stop before the runtime shuts the guest down.
+ * Repeating it after a release does nothing. */
+static void release(void *context) {
+  (void)context;
+  if (ui_bridge) {
+    pocket_worker_ui_detach(ui_bridge);
+    ui_bridge = NULL;
+  }
+  pocket_3ds_worker_stop();
+  instance_detach();
+  instance = NULL;
+}
 
 /* QuickJS calls this every few thousand bytecode steps; a true from the hook
  * ends the running code with an uncatchable InternalError. */
@@ -882,6 +1037,7 @@ bool qjs_boot(PocketRuntimePackage *package, const uint8_t *bytecode,
   last_error[0] = 0;
   interrupted = false;
   first_present = false;
+  boot_has_worker = package->guest.worker_javascript_length != 0;
   boot_bytecode = bytecode;
   boot_bytecode_length = bytecode_length;
   boot_compiled = compiled;
@@ -896,7 +1052,7 @@ bool qjs_boot(PocketRuntimePackage *package, const uint8_t *bytecode,
     set_error("JS_NewRuntime returned null");
     return false;
   }
-  JS_SetMaxStackSize(runtime, POCKETJS_JS_STACK_SIZE);
+  JS_SetMaxStackSize(runtime, QJS_STACK_BYTES);
   JS_SetInterruptHandler(runtime, on_interrupt, NULL);
   /* Functions keep their line tables, so a stack still names its lines, and
    * drop their source text, which Function.prototype.toString alone reads:
@@ -912,21 +1068,39 @@ bool qjs_boot(PocketRuntimePackage *package, const uint8_t *bytecode,
     set_error("QuickJS guest attachment failed");
     return false;
   }
-  instance = instance_create(package);
-  if (!instance || pocket_runtime_set_guest(instance, &guest_api, NULL)) {
+  pocket_qjs_program_host host = {.struct_size = sizeof host,
+                                  .profile = &pocket_3ds_profile,
+                                  .profile_hash = pocket_3ds_profile_hash,
+                                  .guest = &guest_api,
+                                  .guest_error = guest_error,
+                                  .compose = compose,
+                                  .release = release,
+                                  .context = package};
+  composed = false;
+  uint64_t step = push_timing_now();
+  program = pocket_qjs_program_create_host(&host);
+  push_timing_step("qjs-program-create", step, "-");
+  if (!program) {
     set_error("3DS runtime composition failed");
     return false;
   }
-  int32_t booted = pocket_runtime_boot_deferred(instance);
+  /* Runtime reads and admits the package from the source at boot and loads
+   * its assets natively, as the archive's default does. */
+  step = push_timing_now();
+  int booted = pocket_qjs_program_boot_source(
+      program, instance_package_source(), package, package->guest.view_width,
+      package->guest.view_height, package->guest.raster_density,
+      INSTANCE_HEAP_LIMIT, INSTANCE_FRAME_BUFFER_BUDGET);
+  push_timing_step("qjs-program-boot-source", step, "admission, assets, worker start and evaluate together, ok=%d", booted);
   boot_bytecode = NULL;
   boot_compiled = NULL;
   boot_compiled_length = NULL;
-  if (booted) {
+  if (!booted) {
     if (last_error[0] == 0) {
-      const char *message = pocket_guest_quickjs_error(guest);
-      set_error(message && *message
-                    ? message
-                    : "3DS runtime admission or guest initialization failed");
+      const char *message = composed ? pocket_guest_quickjs_error(guest) : NULL;
+      set_error(message && *message ? message
+                : composed       ? "3DS runtime admission or guest initialization failed"
+                                 : "3DS runtime composition failed");
     }
     return false;
   }
@@ -947,6 +1121,10 @@ bool qjs_frame(int32_t buttons, int32_t analog, const uint32_t *touches,
                size_t count, int32_t right) {
   if (!instance)
     return false;
+  if (boot_has_worker) {
+    if (pocket_3ds_worker_error()[0]) { set_error(pocket_3ds_worker_error()); return false; }
+    if (pocket_worker_ui_latch(ui_bridge) < 0) { take_exception(); return false; }
+  }
   /* The frame after boot shows the mounted tree; the guest's first turn
    * follows at the next one. */
   if (first_present)
@@ -962,8 +1140,12 @@ bool qjs_frame(int32_t buttons, int32_t analog, const uint32_t *touches,
 }
 const char *qjs_last_error(void) { return last_error; }
 void qjs_shutdown(void) {
-  instance_destroy();
-  instance = NULL;
+  /* release runs inside when compose ran; otherwise it runs here. */
+  if (program) {
+    pocket_qjs_program_destroy(program);
+    program = NULL;
+  }
+  release(NULL);
 #ifdef POCKETJS_MEDIA
   media_forget_guest();
 #endif

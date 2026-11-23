@@ -22,9 +22,11 @@
  * A requested switch runs under a host-drawn transition (transition.c): the
  * old guest stops and a scrim covers its last frame; a thread of its own
  * draws loading frames with a turning indicator through the teardown, the
- * new guest's bytecode (bytecode.c: cached per slot, else compiled) and its
- * mount; the scrim falls away over the new guest's first frames. QuickJS's interrupt hook reads SELECT inside an installed app's
- * long frame, so the launcher answers without waiting for the frame.
+ * new guest's bytecode (bytecode.c: cached per slot, else compiled on a
+ * thread of its own while the link is pumped, run_bundle) and its mount;
+ * the scrim falls away over the new guest's first frames. QuickJS's
+ * interrupt hook reads SELECT inside an installed app's long frame, so the
+ * launcher answers without waiting for the frame.
  *
  * Building with -DPOCKETJS_CAPTURE turns this into the deterministic e2e
  * binary: input comes from a baked tape instead of the hardware, the listed
@@ -48,10 +50,11 @@
 #include "input_policy.h"
 #include "pocket_core.h"
 #include "qjs.h"
+#include "worker.h"
 #include "offload.h"
 #include "media.h"
 #include "localmedia.h"
-#include "devserver.h"
+#include "devstats.h"
 #include "devmenu.h"
 #include "hbldr.h"
 #include "native.h"
@@ -61,11 +64,19 @@
 #include "camera.h"
 #include "fs.h"
 #include "launcher.h"
-#include "link.h"
+#include "link2_guest.h"
+#include "link2_host.h"
 #include "services_host.h"
 #include "wifi.h"
 #include "transition.h"
 #include "bytecode.h"
+#include "bundle_compile.h"
+#include "push_timing.h"
+#include "slot_folders.h"
+#include "instance.h"
+#ifdef POCKETJS_EXTENSION
+#include "pocket_extension.h"
+#endif
 
 /* The guest surfaces come from the plan of the package in the .3dsx's RomFS
  * (pocket_package_open reads them), never from a literal or a compile flag:
@@ -135,6 +146,12 @@ static bool surfaces_admit(
     return false;
   }
 #endif
+#ifndef POCKETJS_EXTENSION
+  if ((guest->features & POCKET_GUEST_FEATURE_EXTENSION) != 0) {
+    snprintf(error, error_length, "plan needs system.extension, which this runtime does not carry");
+    return false;
+  }
+#endif
 #ifndef POCKETJS_OFFLOAD
   if ((guest->features & POCKET_GUEST_FEATURE_OFFLOAD) != 0) {
     snprintf(error, error_length, "plan needs io.offload, which this runtime does not carry");
@@ -165,11 +182,43 @@ static C3D_RenderTarget *auxiliary_target;
 /* The top screen's right eye: only the agent stage draws in stereo. */
 static C3D_RenderTarget *right_target;
 static bool stage_ready;
+/* Names the step of the main loop a stall report would blame. */
+#ifdef POCKETJS_EXTENSION
+#define LOOP_STEP(name) pocket_extension_trace(name)
+#else
+#define LOOP_STEP(name) ((void)0)
+#endif
+
+/* The runtime's lifecycle goes to the Pocket Link (link2_host.h) and to the
+ * counters a DevTools panel reads (devstats.h). */
+static void report_runtime(
+  const PocketRuntimeState *state,
+  const PocketRuntimePackage *package,
+  const char *phase,
+  uint32_t frame
+) {
+  devstats_set_runtime(state, package, frame);
+  link2_host_set_runtime(state, package, phase, frame);
+}
+
+static void report_install(const char *phase, uint64_t hash, const char *message) {
+  link2_host_report_install(phase, hash, message);
+}
+
+static void report_log(const char *level, const char *message) {
+  link2_host_report_log(level, message);
+}
+
 /* Set around qjs_frame, for the interrupt hook (guest_interrupt). */
 static bool guest_frame_running;
 static u64 guest_frame_started;
 #ifndef POCKETJS_CAPTURE
 static void loading_end(void);
+/* Held by the loading thread while it draws a frame and by compile_serviced
+ * while it pumps the link: a pump's handlers may use the GPU (agent.c hands
+ * an agent.screen frame to stage.c, which transfers it into a texture), and
+ * citro3d is not thread-safe. Initialized in main(). */
+static LightLock loading_gpu;
 #endif
 
 /* Read one completed rotated PICA target as tightly packed RGB8. `width` and
@@ -426,7 +475,7 @@ static void trace_frame(uint32_t js_us, uint32_t tick_us, uint32_t draw_us) {
 static void capture_done(void) {
   FILE *stats = fopen(CAPTURE_DIR "/stats.json", "wb");
   if (stats != NULL) {
-    fprintf(stats, "{\"host\":%s,\"trace\":[", devserver_debug_stats());
+    fprintf(stats, "{\"host\":%s,\"trace\":[", devstats_json());
     uint32_t frames = trace_count < TRACE_FRAMES ? trace_count : TRACE_FRAMES;
     for (uint32_t i = 0; i < frames; i += 1) {
       const uint32_t *slot = trace[(trace_count - frames + i) % TRACE_FRAMES];
@@ -527,9 +576,104 @@ typedef struct {
   uint32_t submitted_frames;
 } GuestChoice;
 
+#ifndef POCKETJS_CAPTURE
+/*
+ * A package's first boot compiles its bundle: bytecode.c has no file for it
+ * yet. The compile is one QuickJS call: 754 ms for a 449 KB bundle on a New
+ * 3DS XL and, by bytecode.h, 2.3 s for 477 KB on an Old 3DS, longer than the
+ * link should go without a pump (docs/POCKET-LINK.md §4.6). The compile and
+ * the write of its file run on a thread of their own, one priority step
+ * below this one, in a QuickJS runtime of their own (bundle_compile.h). This
+ * thread pumps the link every SERVICE_PUMP_NS and sleeps between pumps
+ * (pump_wait), and the compile runs while it sleeps. Nothing else touches
+ * the link meanwhile, so the client stays on one thread; each pump holds
+ * loading_gpu, so a handler that uses the GPU never runs beside a loading
+ * frame. The guest then boots from the bytecode as from the cache. A new
+ * slot's folders take the same path (slot_folders.h).
+ */
+#define SERVICE_PUMP_NS 8000000LL
+/* QuickJS's limit and the frames above the compile's runtime. */
+#define COMPILE_STACK (QJS_STACK_BYTES + 64 * 1024)
+
+/* One turn of a wait for another thread's work (the compile, a slot's
+ * folders): a pump of the link, under loading_gpu, then a sleep in which
+ * that thread runs. */
+static void pump_wait(void) {
+  LightLock_Lock(&loading_gpu);
+  link2_host_pump();
+  LightLock_Unlock(&loading_gpu);
+  svcSleepThread(SERVICE_PUMP_NS);
+}
+
+typedef struct {
+  const uint8_t *code;
+  size_t length;
+  /* bundle.qbc of the package's slot, or NULL. */
+  const char *path;
+  uint64_t hash;
+  uint8_t *bytecode;
+  size_t bytecode_length;
+  u64 compile_ticks;
+  u64 store_ticks;
+  char error[256];
+  atomic_bool done;
+} CompileJob;
+
+static void compile_run(void *opaque) {
+  CompileJob *job = opaque;
+  u64 start = svcGetSystemTick();
+  job->bytecode = bundle_compile(job->code, job->length, QJS_STACK_BYTES, INSTANCE_HEAP_LIMIT, &job->bytecode_length, job->error, sizeof job->error);
+  u64 compiled = svcGetSystemTick();
+  job->compile_ticks = compiled - start;
+  if (job->bytecode != NULL && job->path != NULL) bytecode_store(job->path, job->hash, job->bytecode, job->bytecode_length);
+  job->store_ticks = svcGetSystemTick() - compiled;
+  atomic_store(&job->done, true);
+}
+
+static unsigned long ticks_ms(u64 ticks) {
+  return (unsigned long)(ticks * 1000 / SYSCLOCK_ARM11);
+}
+
+/* The bundle's bytecode, compiled and stored at `path` on the compile thread
+ * while this thread pumps the link. NULL leaves `error`: the compile's
+ * exception, or "" when nothing was compiled (no thread, no runtime) and
+ * qjs_boot compiles in the guest's runtime as before. */
+static uint8_t *compile_serviced(const PocketRuntimePackage *package, const char *path, size_t *length, char *error, size_t error_length) {
+  CompileJob job;
+  memset(&job, 0, sizeof job);
+  job.code = package->guest.javascript;
+  job.length = package->guest.javascript_length;
+  job.path = path;
+  job.hash = package->guest.package_hash;
+  atomic_init(&job.done, false);
+  error[0] = '\0';
+  s32 priority = 0x30;
+  svcGetThreadPriority(&priority, CUR_THREAD_HANDLE);
+  /* 0x3F is the lowest an application thread takes: at it the compile runs
+   * at this thread's priority and its pumps wait for the compile's end. */
+  Thread thread = threadCreate(compile_run, &job, COMPILE_STACK, priority < 0x3f ? priority + 1 : priority, -2, false);
+  if (thread == NULL) return NULL;
+  while (!atomic_load(&job.done)) pump_wait();
+  threadJoin(thread, U64_MAX);
+  threadFree(thread);
+  if (job.bytecode == NULL) {
+    snprintf(error, error_length, "%s", job.error);
+    return NULL;
+  }
+  /* What a slow first boot took, as a `log` line of the link (runtime.logs). */
+  char line[160];
+  snprintf(line, sizeof line, "first boot of %016llx: %lu bytes of source compiled to %lu bytes of bytecode in %lu ms, stored in %lu ms, with the link pumped",
+           (unsigned long long)job.hash, (unsigned long)job.length, (unsigned long)job.bytecode_length, ticks_ms(job.compile_ticks), ticks_ms(job.store_ticks));
+  report_log("info", line);
+  *length = job.bytecode_length;
+  return job.bytecode;
+}
+#endif
+
 /* The bundle into the guest's runtime. Outside a capture build, from the
- * slot's bytecode when bytecode.c has it for this package, else from the
- * source, keeping the bytecode for the next boot. False leaves `error`. */
+ * slot's bytecode when bytecode.c has it for this package; else compiled and
+ * stored first, with the link serviced meanwhile (compile_serviced), then
+ * run from that bytecode. False leaves `error`. */
 static bool run_bundle(PocketRuntimePackage *package, char *error, size_t error_length) {
 #ifdef POCKETJS_CAPTURE
   bool booted = qjs_boot(package, NULL, 0, NULL, NULL);
@@ -538,10 +682,21 @@ static bool run_bundle(PocketRuntimePackage *package, char *error, size_t error_
   bool named = runtime_slot_path(package->guest.slot, "bundle.qbc", path, sizeof path);
   uint64_t hash = package->guest.package_hash;
   size_t length = 0;
+  uint64_t step = push_timing_now();
   uint8_t *bytecode = named ? bytecode_load(path, hash, &length) : NULL;
+  push_timing_step("bytecode-load", step, "%s %lu bytes", bytecode != NULL ? "hit" : "miss", (unsigned long)length);
+  if (bytecode == NULL) {
+    step = push_timing_now();
+    bytecode = compile_serviced(package, named ? path : NULL, &length, error, error_length);
+    push_timing_step("compile-serviced", step, "%lu bytes of bytecode", (unsigned long)length);
+    /* The source does not compile: the boot fails with QuickJS's message, as qjs_boot's would. */
+    if (bytecode == NULL && error[0] != '\0') return false;
+  }
   bool booted;
   if (bytecode != NULL) {
+    step = push_timing_now();
     booted = qjs_boot(package, bytecode, length, NULL, NULL);
+    push_timing_step("qjs-boot", step, "from bytecode, ok=%d", booted);
   } else {
     booted = qjs_boot(package, NULL, 0, &bytecode, &length);
     if (booted && named && bytecode != NULL) bytecode_store(path, hash, bytecode, length);
@@ -561,19 +716,29 @@ static bool boot_guest(
     snprintf(error, error_length, "guest package has no JavaScript");
     return false;
   }
+  uint64_t step = push_timing_now();
   if (!surfaces_admit(package, error, error_length)) return false;
+  push_timing_step("boot-surfaces-admit", step, "-");
+  step = push_timing_now();
   /* link.c names the running app in every NET request, and the guest's
    * first code (a module's top level, the first effects) runs inside
    * qjs_boot and may fetch: the launcher learns the app before it starts. */
   LauncherPackage facts = launcher_package(package);
   launcher_set_current(runtime_slot(), &facts);
+  /* The guest's first lines may use its applet channel: it opens before
+   * qjs_boot publishes `globalThis.channel`. */
+  link2_host_guest_begin(package);
   /* data.fs: the guest's tree is its own slot's data directory, bound before
    * qjs_boot publishes `globalThis.fs`. A card that cannot hold it leaves
    * the namespace out, as on a host without the capability; so does a
    * capture build, whose goldens must not read an earlier run's files. */
+  push_timing_step("boot-launcher-and-channel", step, "-");
+  step = push_timing_now();
   fs_unbind();
 #ifndef POCKETJS_CAPTURE
   if ((package->guest.features & POCKET_GUEST_FEATURE_FS) != 0) {
+    /* data/ and fs-tmp/ of a slot's first boot, created off this thread (slot_folders.h). */
+    while (!slot_folders_ready(package->guest.slot, true)) pump_wait();
     char root[128];
     char temp[128];
     if (runtime_slot_path(package->guest.slot, "data", root, sizeof root) &&
@@ -582,6 +747,8 @@ static bool boot_guest(
     }
   }
 #endif
+  push_timing_step("boot-fs-bind", step, "data.fs=%d", (package->guest.features & POCKET_GUEST_FEATURE_FS) != 0);
+  step = push_timing_now();
   camera_admit(
     (package->guest.features & POCKET_GUEST_FEATURE_CAMERA_QR) != 0,
     (package->guest.features & POCKET_GUEST_FEATURE_CAMERA_PHOTO) != 0
@@ -589,10 +756,23 @@ static bool boot_guest(
   /* The guest's capability decides who owns the top screen; it must be set
    * before qjs_boot, which publishes `globalThis.agent` only for it. */
   bool agent = stage_ready && (package->guest.features & POCKET_GUEST_FEATURE_AGENT) != 0;
+#ifdef POCKETJS_EXTENSION
+  /* Set before qjs_boot, which publishes the extension's global only for it. The
+   * extension takes the microphone and the glyph atlases from the agent's channel. */
+  bool extension = (package->guest.features & POCKET_GUEST_FEATURE_EXTENSION) != 0;
+  pocket_extension_set_enabled(extension);
+  agent_use_channel(extension ? pocket_extension_link_feature() : NULL);
+  agent = agent || extension;
+#endif
   /* Also sets 3D and the top backlight from the console's display mode. */
   agent_set_enabled(agent);
-  if (!run_bundle(package, error, error_length)) {
+  push_timing_step("boot-camera-agent", step, "-");
+  step = push_timing_now();
+  bool ran = run_bundle(package, error, error_length);
+  push_timing_step("run-bundle", step, "ok=%d", ran);
+  if (!ran) {
     qjs_shutdown();
+    link2_host_guest_end();
     gfx_reset_resources();
     fs_unbind();
     return false;
@@ -605,10 +785,10 @@ static void teardown_guest(void) {
   /* Host services keep their process-wide state (the link's connection, an
    * install still streaming) and drop what belonged to this guest. */
   camera_teardown();
-  link_reset_guest();
+  qjs_shutdown();
+  link2_host_guest_end();
   fs_unbind();
   agent_set_enabled(false);
-  qjs_shutdown();
   gfx_reset_resources();
   /* The svc reset contract: the next guest never sees this guest's lines. */
   svcwire_reset();
@@ -756,9 +936,10 @@ static void accept_guest(
   }
   choice->commit_on_accept = false;
   runtime_failure_lineage_reset(failures);
+  push_timing_step("accept-commit", push_timing_now(), "frames submitted %lu", (unsigned long)choice->submitted_frames);
   runtime_write_status(state, choice->package, "accepted");
-  devserver_set_runtime(state, choice->package, "accepted", frame);
-  devserver_report_install("accepted", accepted_hash, "first PICA command list retired");
+  report_runtime(state, choice->package, "accepted", frame);
+  report_install("accepted", accepted_hash, "first PICA command list retired");
 }
 
 
@@ -815,7 +996,9 @@ static void loading_run(void *unused) {
   (void)unused;
   while (!atomic_load(&loading_stop)) {
     /* A GPU still busy with the previous frame skips this one. */
+    LightLock_Lock(&loading_gpu);
     gfx_present_overlays();
+    LightLock_Unlock(&loading_gpu);
     svcSleepThread(LOADING_FRAME_NS);
   }
 }
@@ -858,8 +1041,8 @@ static void recover_running_guest(
   *choice = recovery_choice(state, embedded, failures);
   char fatal[256] = {0};
   if (!boot_with_recovery(choice, state, embedded, failures, fatal, sizeof fatal)) fail(fatal);
-  devserver_set_runtime(state, choice->package, "recovered", run_frame);
-  devserver_report_install(
+  report_runtime(state, choice->package, "recovered", run_frame);
+  report_install(
     candidate ? "rejected" : "recovered",
     rejected,
     message
@@ -915,15 +1098,15 @@ static void install_candidate(
   if (!boot_with_recovery(choice, state, embedded, failures, error, error_length)) fail(error);
   if (choice->state_hash == candidate_hash) {
     if (choice->commit_on_accept) {
-      devserver_set_runtime(state, choice->package, "candidate", *run_frame);
-      devserver_report_install("staged", candidate_hash, "guest booted; waiting for retired frame");
+      report_runtime(state, choice->package, "candidate", *run_frame);
+      report_install("staged", candidate_hash, "guest booted; waiting for retired frame");
     } else {
-      devserver_set_runtime(state, choice->package, "booted", *run_frame);
-      devserver_report_install("accepted", candidate_hash, "package already active; guest restarted");
+      report_runtime(state, choice->package, "booted", *run_frame);
+      report_install("accepted", candidate_hash, "package already active; guest restarted");
     }
   } else {
-    devserver_set_runtime(state, choice->package, "recovered", *run_frame);
-    devserver_report_install("rejected", candidate_hash, error);
+    report_runtime(state, choice->package, "recovered", *run_frame);
+    report_install("rejected", candidate_hash, error);
   }
   *run_frame += 1;
 }
@@ -949,6 +1132,9 @@ static bool select_latched = true;
  * hidKeysDown reports (the dev menu chords) to this scan. */
 static bool guest_interrupt(void) {
   static u64 last_scan;
+#ifdef POCKETJS_EXTENSION
+  pocket_extension_script_tick();
+#endif
   if (!guest_frame_running || launcher_home_running() || launcher_pending() || devmenu_visible()) return false;
   u64 now = svcGetSystemTick();
   if (now - guest_frame_started < LONG_FRAME_TICKS || now - last_scan < SELECT_SCAN_TICKS) return false;
@@ -1022,10 +1208,13 @@ static bool boot_app(
   char *error,
   size_t error_length
 ) {
+  uint64_t step = push_timing_now();
+  while (!slot_folders_ready(target->slot, false)) pump_wait();
   if (!runtime_select_slot(target->slot) || !runtime_storage_init(state, error, error_length)) {
     runtime_package_free(candidate);
     return false;
   }
+  push_timing_step("boot-app-storage", step, "slot %s", target->slot);
   if (candidate != NULL) {
     *choice = package_choice(candidate, candidate->guest.package_hash, state);
   } else {
@@ -1037,11 +1226,16 @@ static bool boot_app(
     if (active == NULL) return false;
     *choice = package_choice(active, state->active_hash, state);
   }
-  if (!boot_guest(choice->package, error, error_length)) {
+  step = push_timing_now();
+  bool booted = boot_guest(choice->package, error, error_length);
+  push_timing_step("boot-guest", step, "ok=%d", booted);
+  if (!booted) {
     release_choice(choice, NULL);
     return false;
   }
+  step = push_timing_now();
   runtime_write_status(state, choice->package, choice->commit_on_accept ? "candidate" : "booted");
+  push_timing_step("write-status", step, "-");
   return true;
 }
 
@@ -1058,40 +1252,49 @@ static void switch_guest(
   uint64_t report_hash,
   uint32_t *run_frame
 ) {
+  uint64_t step = push_timing_now();
   begin_frame_wait(*run_frame);
+  push_timing_step("switch-frame-wait", step, "-");
+  step = push_timing_now();
   accept_guest(choice, state, failures, *run_frame);
   /* The old guest's last frame has retired. From here to the new guest's
    * first frame the loading thread draws the transition, and the teardown
    * releases nothing its frames use. */
   transition_load(osGetTime());
   loading_start();
+  push_timing_step("switch-accept-and-loading-start", step, "-");
+  step = push_timing_now();
   teardown_guest();
+  push_timing_step("switch-teardown", step, "the old guest");
   release_choice(choice, embedded);
   runtime_failure_lineage_reset(failures);
+  /* The install's report follows the runtime's: its reply names the guest
+   * that runs now (generation, app), not the one that just left. */
+  const char *install_phase = NULL;
+  const char *install_message = "";
+  char error[256] = {0};
+  bool rejected = false;
   if (target->home) {
     runtime_package_free(candidate);
     boot_home(choice, state, embedded, failures);
-    if (report_hash != 0) devserver_report_install("accepted", report_hash, "launcher package committed and booted");
+    install_phase = "accepted";
+    install_message = "launcher package committed and booted";
+  } else if (boot_app(choice, state, target, candidate, error, sizeof error)) {
+    install_phase = choice->commit_on_accept ? "staged" : "accepted";
+    install_message = choice->commit_on_accept ? "app booted in its own slot; waiting for retired frame" : "app committed in its own slot and launched";
   } else {
-    char error[256] = {0};
-    if (boot_app(choice, state, target, candidate, error, sizeof error)) {
-      if (report_hash != 0) {
-        if (choice->commit_on_accept) {
-          devserver_report_install("staged", report_hash, "app booted in its own slot; waiting for retired frame");
-        } else {
-          devserver_report_install("accepted", report_hash, "app committed in its own slot and launched");
-        }
-      }
-    } else {
-      /* The app's slot is still selected when boot_app got that far. */
-      if (strcmp(runtime_slot(), target->slot) == 0) runtime_write_error("boot-guest", error);
-      launcher_report_failure(target->output, error);
-      if (report_hash != 0) devserver_report_install("rejected", report_hash, error);
-      boot_home(choice, state, embedded, failures);
-    }
+    /* The app's slot is still selected when boot_app got that far. */
+    if (strcmp(runtime_slot(), target->slot) == 0) runtime_write_error("boot-guest", error);
+    launcher_report_failure(target->output, error);
+    rejected = true;
+    boot_home(choice, state, embedded, failures);
   }
   select_latched = true;
-  devserver_set_runtime(state, choice->package, choice->commit_on_accept ? "candidate" : "booted", *run_frame);
+  /* A rejected package is reported before the home that replaces it boots
+   * into the status: its reply carries no guest. */
+  if (rejected && report_hash != 0) report_install("rejected", report_hash, error);
+  report_runtime(state, choice->package, choice->commit_on_accept ? "candidate" : "booted", *run_frame);
+  if (!rejected && report_hash != 0) report_install(install_phase, report_hash, install_message);
   *run_frame += 1;
 }
 
@@ -1108,6 +1311,8 @@ static void fail_to_home(
 ) {
   runtime_write_error(phase, message);
   launcher_report_failure(launcher_current_output(), message);
+  /* The guest's own exception, for a client that follows the logs. */
+  report_log("error", message);
   bool candidate = choice->commit_on_accept;
   uint64_t rejected = choice->state_hash;
   /* A failing candidate is never accepted on the way out. */
@@ -1117,7 +1322,7 @@ static void fail_to_home(
   snprintf(home.slot, sizeof home.slot, "%s", launcher_home_slot());
   home.home = true;
   switch_guest(choice, state, embedded, failures, &home, NULL, 0, run_frame);
-  if (candidate) devserver_report_install("rejected", rejected, message);
+  if (candidate) report_install("rejected", rejected, message);
 }
 
 /* A dev-wire package for an app other than the running one: commit it in
@@ -1132,20 +1337,33 @@ static bool route_upload(
   uint32_t *run_frame
 ) {
   char error[256] = {0};
+  uint64_t step = push_timing_now();
   PocketRuntimePackage *peek = runtime_package_load(POCKET_RUNTIME_UPLOAD, error, sizeof error);
+  push_timing_step("route-peek", step, "read and opened the staging file to learn its slot");
   if (peek == NULL) return false; /* the ordinary path reports the error */
   char slot[17];
   snprintf(slot, sizeof slot, "%s", peek->guest.slot);
+  bool data_fs = (peek->guest.features & POCKET_GUEST_FEATURE_FS) != 0;
   runtime_package_free(peek);
   if (strcmp(slot, runtime_slot()) == 0) return false;
+  /* A new slot's folders cost seconds on some cards: created on their own
+   * thread while the link is pumped, before the install and the boot ask
+   * for them (slot_folders.h). */
+  step = push_timing_now();
+  while (!slot_folders_ready(slot, data_fs)) pump_wait();
+  push_timing_step("slot-folders", step, "slot %s, data.fs=%d", slot, data_fs);
+  step = push_timing_now();
   PocketRuntimePackage *installed = runtime_slot_install(slot, POCKET_RUNTIME_UPLOAD, upload_hash, state, error, sizeof error);
+  push_timing_step("slot-install", step, "slot %s, ok=%d", slot, installed != NULL);
   if (installed == NULL) {
     runtime_write_error("network-package", error);
-    devserver_report_install("rejected", upload_hash, error);
+    report_install("rejected", upload_hash, error);
     return true;
   }
   LauncherPackage facts = launcher_package(installed);
+  step = push_timing_now();
   launcher_note_installed(slot, &facts);
+  push_timing_step("launcher-note-installed", step, "app.txt of slot %s", slot);
   LauncherTarget target;
   memset(&target, 0, sizeof target);
   snprintf(target.slot, sizeof target.slot, "%s", slot);
@@ -1155,7 +1373,9 @@ static bool route_upload(
     runtime_package_free(installed);
     installed = NULL;
   }
+  step = push_timing_now();
   switch_guest(choice, state, embedded, failures, &target, installed, upload_hash, run_frame);
+  push_timing_step("switch-guest", step, "the whole switch");
   return true;
 }
 #endif /* POCKETJS_LINK */
@@ -1166,10 +1386,17 @@ static bool route_upload(
 
 int main(void) {
   gfxInitDefault();
+#ifndef POCKETJS_CAPTURE
+  LightLock_Init(&loading_gpu);
+#endif
   /* No-op on an Old 3DS; on a New 3DS it unlocks the faster clock and the
    * extra cache, which the QuickJS guest feels directly. */
   osSetSpeedupEnable(true);
+#ifdef POCKETJS_EXTENSION
+  C3D_Init(pocket_extension_command_buffer_bytes());
+#else
   C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
+#endif
 #ifndef POCKETJS_CAPTURE
   /* Debug UI must never make an otherwise admissible guest unbootable. */
   (void)devmenu_init();
@@ -1215,11 +1442,17 @@ int main(void) {
   }
 
   if (!gfx_init(VIEW_W, VIEW_H)) fail("PICA200 backend failed to initialize");
+#ifdef POCKETJS_EXTENSION
+  /* This binary's top screen is the extension's: no mascot. */
+  right_target = C3D_RenderTargetCreate(VIEW_H, VIEW_W, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+  if (!pocket_extension_init()) fail("the product extension failed to initialize");
+#else
   /* A missing stage leaves the top screen to the guest, never a failed boot. */
   right_target = C3D_RenderTargetCreate(VIEW_H, VIEW_W, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
   if (right_target != NULL) {
     stage_ready = stage_init();
   }
+#endif
   if (!gfx_bind_targets(primary_target, auxiliary_target, right_target, VIEW_W, VIEW_H, AUX_VIEW_W, AUX_VIEW_H)) fail("PICA display registration failed");
 
   PocketRuntimeState runtime_state = {0};
@@ -1228,22 +1461,17 @@ int main(void) {
     fail(runtime_error);
   }
   native_set_running_path(__system_argc > 0 ? __system_argv[0] : NULL);
-  DevserverInitResult devserver_result = devserver_init(
-    &runtime_state,
-    runtime_error,
-    sizeof runtime_error
-  );
-  if (devserver_result == DEVSERVER_ERROR) {
-    /* Pairing/network failure must not make the accepted guest unbootable.
-     * Persist it for the next FTP inspection and continue without DevTools.
-     * The main loop retries: socInit fails transiently when the app starts
-     * while WiFi is still re-associating (e.g. right after ftpd exits). */
-    runtime_write_error("devserver-init", runtime_error);
-  }
+  /* The sockets the link, the service wire and the worker use. A failure
+   * must not make the accepted guest unbootable: it is kept for the next
+   * inspection of the card, and the main loop asks again, because socInit
+   * fails for a moment when the program starts while Wi-Fi is still
+   * re-associating (right after ftpd exits, for one). */
+  bool soc_up = soc_ensure(runtime_error, sizeof runtime_error);
+  if (!soc_up) runtime_write_error("soc-init", runtime_error);
   LauncherPackage home = launcher_package(embedded);
   launcher_init(embedded->guest.slot, &home);
   services_host_bind_runtime(&runtime_state);
-  link_init();
+  link2_host_init(embedded);
   qjs_set_interrupt(guest_interrupt);
 #endif
   PocketRuntimeFailureLineage failures = {0};
@@ -1272,7 +1500,7 @@ int main(void) {
     fail(runtime_error);
   }
 #ifndef POCKETJS_CAPTURE
-  devserver_set_runtime(
+  report_runtime(
     &runtime_state,
     guest.package,
     guest.commit_on_accept ? "candidate" : "booted",
@@ -1312,36 +1540,28 @@ int main(void) {
     size_t touch_count = input_touch(&touch);
 #else
     if (input_exit_requested()) break;
-    if (devserver_result == DEVSERVER_ERROR && run_frame % 300 == 299) {
+#ifdef POCKETJS_EXTENSION
+    if (pocket_extension_quit_requested()) break;
+#endif
+    if (!soc_up && run_frame % 300 == 299) {
       /* One retry every ~5 s until the transient boot-time failure clears. */
-      devserver_result = devserver_init(&runtime_state, runtime_error, sizeof runtime_error);
-      if (devserver_result == DEVSERVER_READY) {
-        devserver_set_runtime(
-          &runtime_state,
-          guest.package,
-          guest.commit_on_accept ? "candidate" : "booted",
-          run_frame
-        );
-      }
+      soc_up = soc_ensure(runtime_error, sizeof runtime_error);
     }
-    devserver_poll();
+    LOOP_STEP("service wire");
     svcwire_pump();
-    link_pump();
+    LOOP_STEP("worker service");
+    pocket_3ds_worker_service();
+    LOOP_STEP("link");
+    link2_host_pump();
+    LOOP_STEP("worker service 2");
+    pocket_3ds_worker_service();
+    LOOP_STEP("wifi");
     wifi_pump();
-    {
-      /* An installed or named .3dsx starts when this process exits: the same
-       * hand-off the Homebrew Launcher makes, so the loop ends here. */
-      char launch_name[POCKET_RUNTIME_NATIVE_NAME_BYTES + 1];
-      char launch_path[POCKET_NATIVE_PATH_BYTES];
-      if (devserver_take_launch(launch_name) && native_path_for(launch_name, launch_path)) {
-        if (hbldr_launch_on_exit(launch_path, runtime_error, sizeof runtime_error)) {
-          devserver_report_native("launching", launch_name, "exiting to start it");
-          devserver_flush(1000);
-          break;
-        }
-        devserver_report_native("launch-error", launch_name, runtime_error);
-      }
-    }
+    LOOP_STEP("loop");
+    /* A .3dsx armed over the link starts when this process exits, the same
+     * hand-off the Homebrew Launcher makes; its reply and the CLOSE have
+     * left (link2_host.c). */
+    if (link2_host_exit_requested()) break;
     if (launcher_pending()) {
       /* A switch starts once the leaving scrim covers the old guest. */
       u64 now = osGetTime();
@@ -1359,12 +1579,12 @@ int main(void) {
     if (devmenu_visible() && input_devmenu_close_requested()) devmenu_hide();
     if (devmenu_visible() && input_devmenu_screenshot_requested()) {
       devmenu_set_notice(
-        devserver_request_screenshot() ? "SHOT QUEUED" : "NO DEV CLIENT"
+        link2_host_request_screenshot() ? "SHOT QUEUED" : "NOT LINKED"
       );
     }
     bool devmenu_blocks_guest = input_devmenu_blocks_guest(devmenu_visible());
     uint64_t upload_hash = 0;
-    if (devserver_take_upload(&upload_hash)) {
+    if (link2_host_take_upload(&upload_hash)) {
       if (route_upload(&guest, &runtime_state, embedded, &failures, upload_hash, &run_frame)) continue;
       PocketRuntimePackage *uploaded = NULL;
       RuntimePendingResult result = runtime_prepare_file(
@@ -1384,7 +1604,7 @@ int main(void) {
           );
         }
         runtime_write_error("network-package", runtime_error);
-        devserver_report_install("rejected", upload_hash, runtime_error);
+        report_install("rejected", upload_hash, runtime_error);
       } else {
         install_candidate(
           &guest,
@@ -1436,6 +1656,15 @@ int main(void) {
     uint32_t touch = 0;
     size_t touch_count = devmenu_blocks_guest ? 0 : input_touch(&touch);
 #endif
+#ifdef POCKETJS_EXTENSION
+    if (pocket_extension_enabled()) {
+      LOOP_STEP("agent pump");
+      agent_pump();
+      LOOP_STEP("extension tick");
+      buttons = pocket_extension_tick(buttons, analog, right_analog);
+      LOOP_STEP("wait for the GPU");
+    } else
+#endif
     if (agent_enabled()) {
       if (buttons != 0 || touch_count > 0) stage_note_activity();
       buttons = agent_filter_buttons(buttons);
@@ -1443,6 +1672,13 @@ int main(void) {
       stage_tick();
     }
 
+#if defined(POCKETJS_PUSH_TIMING)
+    /* DIAGNOSTIC: the first frames of a pushed guest, until its `accepted`. */
+    static uint32_t frames_timed;
+    if (!push_timing_active()) frames_timed = 0;
+    bool time_frame = push_timing_active() && frames_timed < 8;
+    if (time_frame) frames_timed += 1;
+#endif
     u64 phase_wait __attribute__((unused)) = svcGetSystemTick();
     uint32_t gpu_late __attribute__((unused)) = begin_frame_wait(
 #ifdef POCKETJS_CAPTURE
@@ -1452,18 +1688,22 @@ int main(void) {
 #endif
     );
     u64 phase_wait_end __attribute__((unused)) = svcGetSystemTick();
+#ifdef POCKETJS_EXTENSION
+    if (pocket_extension_enabled()) pocket_extension_frame_begin();
+    LOOP_STEP("camera");
+#endif
 #ifdef POCKETJS_MEDIA
     media_present();
 #endif
     camera_present();
-    if (agent_enabled()) {
+    if (agent_enabled() && stage_ready) {
       stage_capture_mirror(auxiliary_target);
       agent_capture(auxiliary_target);
     }
 #ifndef POCKETJS_CAPTURE
     if (devmenu_visible()) {
       char link_line[48];
-      link_describe(link_line, sizeof link_line);
+      link2_guest_describe(link_line, sizeof link_line);
       devmenu_set_link_line(link_line);
     }
 #endif
@@ -1475,10 +1715,22 @@ int main(void) {
     if (transition == TRANSITION_ARRIVING) transition_advance(transition_now);
     u64 offload_cpu_start = svcGetSystemTick();
     u64 phase_js __attribute__((unused)) = offload_cpu_start;
+    LOOP_STEP("link before the frame");
+    link2_host_before_frame();
     guest_frame_started = svcGetSystemTick();
     guest_frame_running = true;
+    LOOP_STEP("guest frame");
     bool frame_ran = qjs_frame(buttons, analog, &touch, touch_count, right_analog);
     guest_frame_running = false;
+#if defined(POCKETJS_PUSH_TIMING)
+    if (time_frame) {
+      push_timing_step("frame-total", phase_wait, "from the frame wait to the guest frame's end, frame %lu, vblanks late %lu", (unsigned long)run_frame, (unsigned long)gpu_late);
+      push_timing_step("guest-frame", guest_frame_started, "frame %lu, ran=%d", (unsigned long)run_frame, frame_ran);
+    }
+#endif
+#ifdef POCKETJS_EXTENSION
+    if (frame_ran && pocket_extension_enabled()) pocket_extension_after_frame();
+#endif
     if (!frame_ran) {
 #if defined(POCKETJS_CAPTURE) || defined(POCKETJS_OFFLOAD)
       fail(qjs_last_error());
@@ -1532,7 +1784,7 @@ int main(void) {
          * whole time is the js column. */
         trace_frame(ticks_to_us(phase_tick - phase_js), 0, 0);
 #endif
-        devserver_set_frame_timing(
+        devstats_set_frame_timing(
           ticks_to_us(phase_tick - phase_js),
           0, /* Internal tick/layout/render phases belong to the runtime. */
           0,
@@ -1550,37 +1802,27 @@ int main(void) {
 #endif
 #if !defined(POCKETJS_CAPTURE) && !defined(POCKETJS_OFFLOAD)
     guest.submitted_frames += 1;
-    devserver_set_frame_stats(
+    devstats_set_frame_stats(
       run_frame,
       gfx_frame_commands(),
       gfx_frame_vertices(),
       gfx_dropped_vertices()
     );
-    if (devserver_take_screenshot_request()) {
+    link2_host_set_frame(run_frame);
+    if (link2_host_take_screenshot_request()) {
+      /* runtime.screenshot, asked for by Hub or sent from the dev menu: the
+       * canonical tick has retired both surfaces, and both targets are
+       * copied into buffers the link streams and frees before the next tick
+       * can overwrite either. */
       uint8_t *top_rgb = NULL;
       uint8_t *auxiliary_rgb = NULL;
-      if (devserver_screenshot_begin(
-            run_frame,
-            VIEW_W,
-            VIEW_H,
-            AUX_VIEW_W,
-            AUX_VIEW_H,
-            &top_rgb,
-            &auxiliary_rgb
-          )) {
-        /* Canonical tick has retired both surfaces. Copy both targets before
-         * the next tick can overwrite either. */
+      if (link2_host_screenshot_begin(run_frame, VIEW_W, VIEW_H, AUX_VIEW_W, AUX_VIEW_H, &top_rgb, &auxiliary_rgb)) {
         gspWaitForVBlank();
         read_surface_rgb8(primary_target, VIEW_W, VIEW_H, top_rgb);
-        read_surface_rgb8(
-          auxiliary_target,
-          AUX_VIEW_W,
-          AUX_VIEW_H,
-          auxiliary_rgb
-        );
-        devserver_screenshot_ready();
+        read_surface_rgb8(auxiliary_target, AUX_VIEW_W, AUX_VIEW_H, auxiliary_rgb);
+        link2_host_screenshot_ready();
       } else {
-        devserver_report_log("error", "screenshot: linear buffer allocation failed");
+        report_log("error", "screenshot: linear buffer allocation failed");
       }
     }
     run_frame += 1;
@@ -1633,13 +1875,15 @@ int main(void) {
   teardown_guest();
   agent_shutdown();
   stage_shutdown();
+#ifdef POCKETJS_EXTENSION
+  pocket_extension_shutdown();
+#endif
   release_choice(&guest, embedded);
   runtime_package_free(embedded);
 #ifndef POCKETJS_CAPTURE
-  link_shutdown();
+  link2_host_shutdown();
   wifi_shutdown();
   svcwire_shutdown();
-  devserver_shutdown();
   soc_shutdown();
   devmenu_shutdown();
 #endif

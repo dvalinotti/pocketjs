@@ -32,11 +32,12 @@ describe("published npm artifacts", () => {
       const directory = join(scratch, "package");
       symlinkSync(join(root, "node_modules"), join(directory, "node_modules"), "dir");
       writeFileSync(join(directory, "consumer.ts"), `
-import { defineProfile } from "@pocketjs/framework/profile";
-import psp from "@pocketjs/framework/profiles/psp";
+import { parsePocketProfile } from "@pocketjs/framework/profile";
+import psp from "@pocketjs/framework/hosts/psp" with { type: "json" };
 import { resolveRuntimeProgram } from "./tools/build/programs.ts";
 import { sdkCommand } from "./tools/sdk.ts";
-const external = defineProfile({ ...psp, id: "external-product-with-a-long-id" });
+const external = parsePocketProfile({ ...psp, id: "external-product-with-a-long-id" });
+if (external.id !== "external-product-with-a-long-id") throw Error("host contract not parsed");
 const selected = await resolveRuntimeProgram({ from: ${JSON.stringify(scratch)}, target: "psp", generic: true });
 if (!selected.config.value.build.genericRuntime.repack) throw Error("missing repack adapter");
 if (await sdkCommand(["export", "--cargo", "--out", ${JSON.stringify(join(scratch, "program"))}])) throw Error("template failed");
@@ -45,7 +46,8 @@ console.log("npm consumer passed");
       const consumer = Bun.spawnSync([process.execPath, "consumer.ts"], { cwd: directory, stdout: "pipe", stderr: "pipe" });
       expect(consumer.success, consumer.stderr.toString()).toBe(true);
       expect(consumer.stdout.toString()).toContain("npm consumer passed");
-      expect(readFileSync(join(scratch, "program/Cargo.toml"), "utf8")).toContain('version = "0.1.0", default-features = false');
+      const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
+      expect(readFileSync(join(scratch, "program/Cargo.toml"), "utf8")).toContain(`pocket-archive = { git = "https://github.com/pocket-nexus/pocketjs", tag = "v${version}", default-features = false, features = ["physics","software-renderer"] }`);
     } finally { rmSync(scratch, { recursive: true, force: true }); }
   }, 60_000);
 });

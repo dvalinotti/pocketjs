@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { AOT_CARGO_ENV } from "../microts/compiler/cargo-target.ts";
 import { analyzeSolidAot } from "../microts/compiler/aot-solid-frontend.ts";
 import { emitAot } from "../microts/compiler/aot-codegen.ts";
 import { jsxPlugin } from "../framework/compiler/jsx-plugin.ts";
@@ -16,7 +17,7 @@ test("Solid and Rust agree frame by frame on keyed dispatch, owned events and li
   await Bun.write(resolve(run, "src/generated.rs"), emitAot(program).files["app.rs"]!);
   await Bun.write(resolve(run, "src/main.rs"), Bun.file(resolve(fixture, "native.rs")));
   await Bun.write(resolve(run, "styles.bin"), new Uint8Array(program.styles.bytes));
-  await Bun.write(resolve(run, "Cargo.toml"), `[package]\nname="aot-differential"\nversion="0.0.0"\nedition="2021"\n[workspace]\n[dependencies]\nmicrots={path=${JSON.stringify(resolve("engine/crates/microts"))}}\nserde_json="1"\n`);
+  await Bun.write(resolve(run, "Cargo.toml"), `[package]\nname="aot-differential"\nversion="0.0.0"\nedition="2021"\n[workspace]\n[dependencies]\nmicrots={path=${JSON.stringify(resolve("engine/microts-runtime"))}}\nserde_json="1"\n`);
   const wasmBuild = Bun.spawnSync([process.execPath, "tools/wasm.ts"], { stdout: "pipe", stderr: "pipe" });
   await Bun.write(resolve(run, "wasm-build.log"), wasmBuild.stdout.toString() + wasmBuild.stderr.toString());
   expect(wasmBuild.exitCode, wasmBuild.stderr.toString()).toBe(0);
@@ -60,7 +61,7 @@ console.log(JSON.stringify(check()));
   expect(oracleRun.exitCode, oracleRun.stderr.toString()).toBe(0);
   const solid = JSON.parse(oracleRun.stdout.toString());
   const native = Bun.spawnSync(["cargo", "run", "--quiet", "--manifest-path", resolve(run, "Cargo.toml"), "--", resolve(fixture, "fixture.json"), resolve(fixture, "tape.json"), resolve(run, "styles.bin")], {
-    stdout: "pipe", stderr: "pipe", env: { ...process.env, CARGO_TARGET_DIR: resolve(".pocket-build/validation/solid-aot/differential/target") },
+    stdout: "pipe", stderr: "pipe", env: { ...process.env, ...AOT_CARGO_ENV },
   });
   await Bun.write(resolve(run, "native.log"), native.stderr);
   expect(native.exitCode, native.stderr.toString()).toBe(0);

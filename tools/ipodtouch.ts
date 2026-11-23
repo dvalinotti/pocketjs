@@ -1,5 +1,5 @@
 import { STABLE_RUST_TOOLCHAIN } from "../tools/build/toolchains/rust.ts";
-import type { RuntimeApplication } from "../framework/src/runtime-config.ts";
+import type { RuntimeApplication } from "../framework/src/host-config.ts";
 import { applicationBundle, runProgramBuild } from "./build/programs/application.ts";
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -140,7 +140,7 @@ function check(label: string, ok: boolean, detail: string): boolean {
 }
 
 function manifestPath(): string {
-  return join(REPOSITORY, "apps/ipodtouch-demo/pocket.json");
+  return join(REPOSITORY, "apps/ipodtouch-demo/pocket.app.json");
 }
 
 function planPath(): string {
@@ -365,13 +365,13 @@ export async function buildIPodTouchNative(application: RuntimeApplication, outd
     join(REPOSITORY, "programs/ipodtouch6/Icon.svg"),
     join(REPOSITORY, "tools/ipodtouch.ts"),
     join(REPOSITORY, "tools/ipodtouch-icon.ts"),
-    join(REPOSITORY, "engine/ios/include/pocket_apple.h"),
+    join(REPOSITORY, "platforms/apple/include/pocket_apple.h"),
     join(REPOSITORY, "contracts/generated/pocket_runtime.h"),
     join(REPOSITORY, "contracts/generated/pocket_drivers.h"),
     join(REPOSITORY, "contracts/generated/pocket_spec.h"),
-    join(REPOSITORY, "engine/ios/uikit/PocketSurfaceView.h"),
-    join(REPOSITORY, "engine/ios/uikit/PocketSurfaceView.m"),
-    join(REPOSITORY, "engine/ios/src/lib.rs"),
+    join(REPOSITORY, "platforms/apple/uikit/PocketSurfaceView.h"),
+    join(REPOSITORY, "platforms/apple/uikit/PocketSurfaceView.m"),
+    join(REPOSITORY, "platforms/apple/src/lib.rs"),
     {
       label: "native/libpocket_apple.a",
       path: rustLibrary,
@@ -390,13 +390,13 @@ export async function buildIPodTouchNative(application: RuntimeApplication, outd
     `-DPOCKETJS_BUILD_ID=\"${buildId}\"`,
     `-DPOCKETJS_APP_OUTPUT=\"${inputs.appOutput}\"`,
     "-I",
-    join(REPOSITORY, "engine/ios/uikit"),
+    join(REPOSITORY, "platforms/apple/uikit"),
     "-I",
-    join(REPOSITORY, "engine/ios/include"),
+    join(REPOSITORY, "platforms/apple/include"),
     "-I",
     join(REPOSITORY, "contracts/generated"),
     join(REPOSITORY, "programs/ipodtouch6/runtime.m"),
-    join(REPOSITORY, "engine/ios/uikit/PocketSurfaceView.m"),
+    join(REPOSITORY, "platforms/apple/uikit/PocketSurfaceView.m"),
     rustLibrary,
     "-framework",
     "Foundation",

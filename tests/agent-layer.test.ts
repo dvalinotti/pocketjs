@@ -3,7 +3,7 @@
 // the wasm core with the 3DS geometry and a fake `globalThis.agent`
 // (platforms/sim/agent.ts) in place of the host and the companion.
 //
-// The overlay is added by the build because the fixture's pocket.json
+// The overlay is added by the build because the fixture's pocket.app.json
 // declares "system.agent"; nothing in the fixture imports it.
 //
 // POCKET_AGENT_SHOTS=<dir> writes bottom-screen PNGs of each state.
@@ -24,11 +24,11 @@ const OUTPUT = "agent-fixture-main";
 const GUEST = join(OUT, "guest", OUTPUT);
 const FIXTURE = { id: "dev.pocket-nexus.agent-fixture", title: "Agent Fixture", output: OUTPUT };
 const SHOTS = process.env.POCKET_AGENT_SHOTS;
-const GLOBALS = ["ui", "__pak", "__simHz", "frame", "link", "wifi", "camera", "net", "agent", "__pocketApp"] as const;
+const GLOBALS = ["ui", "__pak", "__simHz", "frame", "link", "wifi", "camera", "agent", "__pocketApp"] as const;
 const saved = new Map(GLOBALS.map((key) => [key, (globalThis as Record<string, unknown>)[key]]));
 
 beforeAll(() => {
-  const manifest = JSON.parse(readFileSync(join(ROOT, "tests/fixtures/agent-app/pocket.json"), "utf8"));
+  const manifest = JSON.parse(readFileSync(join(ROOT, "tests/fixtures/agent-app/pocket.app.json"), "utf8"));
   const plan = join(OUT, "plan.json");
   writeFileSync(plan, JSON.stringify(resolve3dsBuildPlan(manifest)));
   const build = Bun.spawnSync(
@@ -279,12 +279,12 @@ describe("tools on the user's screen", () => {
     app.agent!.push({ t: "agent.tool", id: 13, call: "l1", name: "launch", args: { app: "Agent Fixture" } });
     await app.run(30);
     expect(sentOf(app, "agent.result").find((message) => message.call === "l1")?.ok).toBe(true);
-    app.agent!.push({ t: "agent.tool", id: 13, call: "l2", name: "launch", args: { app: "Pocket Home" } });
+    app.agent!.push({ t: "agent.tool", id: 13, call: "l2", name: "launch", args: { app: "Pocket Shell" } });
     await app.run(4);
     expect(sentOf(app, "agent.result").find((message) => message.call === "l2")?.ok).toBe(false);
     app.agent!.push({ t: "agent.tool", id: 13, call: "l3", name: "launch", args: { app: "home" } });
     await app.run(4);
-    expect(app.launches).toEqual(["home-main"]);
+    expect(app.launches).toEqual(["pocket-shell"]);
     expect(sentOf(app, "agent.result").find((message) => message.call === "l3")).toBeUndefined();
   });
 });

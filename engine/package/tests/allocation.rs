@@ -3,6 +3,7 @@
 use pocket_package::{
     embedded::{encode, identity, EmbeddedPackage},
     source::{LoadedPackage, OwnedMemorySource, StaticMemorySource},
+    HostFacts,
 };
 use std::{
     alloc::{GlobalAlloc, Layout, System},
@@ -51,6 +52,20 @@ fn count<T>(operation: impl FnOnce() -> T) -> (T, usize) {
     (result, LARGE_ALLOCATIONS.load(Ordering::Relaxed))
 }
 
+const PLAN: &[u8] = br#"{"animation":"composited","features":{},"profile":{"tickHz":60},"viewport":{"logical":[480,272],"presentation":"native","rasterDensity":1}}"#;
+const HOST: HostFacts<'static, &'static str> = HostFacts {
+    binding_generation: 12,
+    profile_hash: [0x11; 32],
+    raster_density: 1,
+    animation: Some("composited"),
+    cadences: &[60],
+    logical_viewports: &[[480, 272]],
+    dynamic_viewport: None,
+    presentations: Some(&["native"]),
+    capabilities: &[],
+    auxiliary_logical: &[],
+};
+
 #[test]
 fn large_embedded_package_uses_one_container_and_transfers_it_without_copying() {
     let identity = identity("large", "test.large", "Large package").unwrap();
@@ -62,7 +77,7 @@ fn large_embedded_package_uses_one_container_and_transfers_it_without_copying() 
             host_abi: 12,
             profile_hash: [0x11; 32],
             identity: &identity,
-            plan: b"{}",
+            plan: PLAN,
             code: &code,
             pak: &pak,
         })
@@ -74,14 +89,7 @@ fn large_embedded_package_uses_one_container_and_transfers_it_without_copying() 
     );
     let address = bytes.as_ptr();
     let (loaded, allocations) = count(|| {
-        LoadedPackage::load(
-            &mut OwnedMemorySource::new(bytes),
-            "fixture",
-            12,
-            &[0x11; 32],
-            usize::MAX,
-        )
-        .unwrap()
+        LoadedPackage::load(&mut OwnedMemorySource::new(bytes), &HOST, usize::MAX).unwrap()
     });
     assert_eq!(
         allocations, 0,
@@ -94,17 +102,35 @@ fn large_embedded_package_uses_one_container_and_transfers_it_without_copying() 
 
     // A static image follows the same parser; retaining it cannot allocate a
     // package-sized buffer. The leak is confined to this test process.
-    let bytes = Box::leak(loaded.bytes().to_vec().into_boxed_slice());
-    let (loaded, allocations) = count(|| {
-        LoadedPackage::load(
-            &mut StaticMemorySource(bytes),
-            "fixture",
-            12,
-            &[0x11; 32],
-            usize::MAX,
-        )
-        .unwrap()
-    });
+    let bytes: &'static [u8] = Box::leak(loaded.bytes().to_vec().into_boxed_slice());
+    let (loaded, allocations) =
+        count(|| LoadedPackage::load(&mut StaticMemorySource(bytes), &HOST, usize::MAX).unwrap());
     assert_eq!(allocations, 0);
+    assert_eq!(loaded.bytes().as_ptr(), bytes.as_ptr());
+
+    // Foreign storage a program keeps alive is read in place as well. The
+    // check shares this test's counting window: the counter is global.
+    use pocket_drivers::{PackageBytes, PackageSource, PackageStorage, SourceError};
+    struct Leased(&'static [u8]);
+    impl PackageStorage for Leased {
+        fn bytes(&self) -> &[u8] {
+            self.0
+        }
+    }
+    struct Source(&'static [u8]);
+    impl PackageSource for Source {
+        fn length(&self) -> Result<usize, SourceError> {
+            Ok(self.0.len())
+        }
+        fn take_bytes(&mut self) -> Result<PackageBytes, SourceError> {
+            Ok(PackageBytes::Foreign(Box::new(Leased(self.0))))
+        }
+        fn range(&mut self, _: usize, _: &mut [u8]) -> Result<usize, SourceError> {
+            panic!("must not fall back after transfer")
+        }
+    }
+    let (loaded, allocations) =
+        count(|| LoadedPackage::load(&mut Source(bytes), &HOST, usize::MAX).unwrap());
+    assert_eq!(allocations, 0, "transferred storage is read in place");
     assert_eq!(loaded.bytes().as_ptr(), bytes.as_ptr());
 }

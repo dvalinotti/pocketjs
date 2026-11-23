@@ -1,6 +1,7 @@
 //! The facts a generic native runtime reads from a variant's ResolvedBuildPlan
-//! (`.pocket` section 2) when it boots: the primary viewport and its raster
-//! density, the auxiliary surface, and named feature flags.
+//! (`.pocket` section 2) when it boots: the primary viewport, its presentation
+//! and raster density, the auxiliary surface, the package tick rate, the
+//! animation class and named feature flags.
 //!
 //! A runtime built for one game has these compiled in from the plan the build
 //! tool resolved. A runtime built once for every game of a target reads them
@@ -8,12 +9,21 @@
 //! canonical JSON (`framework/src/manifest/plan.ts` `canonicalJson`); this
 //! reader accepts any well-formed JSON and looks up only the paths it needs:
 //!
+//! ```text
 //!   viewport.logical              [width, height]
 //!   viewport.rasterDensity        integer 1..255
+//!   viewport.presentation         string (absent: None)
 //!   surfaces.auxiliary.logical    [width, height]   (absent: no auxiliary)
 //!   surfaces.auxiliary.rasterDensity
+//!   profile.tickHz                integer (absent: None)
+//!   animation                     string (absent: None)
 //!   features.<name>               boolean (absent: false)
 //!   companions                    array (absent or empty: none)
+//! ```
+//!
+//! Strings are returned as the raw bytes between their quotes; the plan's
+//! names (presentations, animation classes, capability ids) contain no
+//! escapes.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanFactsError {
@@ -38,6 +48,13 @@ pub struct PlanFacts<'a> {
     pub auxiliary: Option<PlanSurface>,
     /// The plan names at least one companion service (`app.companions`).
     pub companions: bool,
+    /// `profile.tickHz`: core ticks per virtual second the package was
+    /// compiled for.
+    pub tick_hz: Option<u32>,
+    /// `animation`: the animation class baked into the package.
+    pub animation: Option<&'a [u8]>,
+    /// `viewport.presentation`: how the primary viewport maps to the panel.
+    pub presentation: Option<&'a [u8]>,
     plan: &'a [u8],
     features: Option<usize>,
 }
@@ -48,9 +65,91 @@ impl<'a> PlanFacts<'a> {
         let Some(start) = self.features else {
             return false;
         };
-        let mut reader = Reader { bytes: self.plan, at: start };
+        let mut reader = Reader {
+            bytes: self.plan,
+            at: start,
+        };
         matches!(reader.member(name.as_bytes()), Ok(Some((value, _))) if self.plan[value..].starts_with(b"true"))
     }
+
+    /// The names whose `features.<name>` value is `true`, in plan order:
+    /// required capabilities and enhancements that resolved available. The
+    /// compiler baked all of them into the bundle.
+    pub fn enabled_features(&self) -> Features<'a> {
+        Features {
+            reader: Reader {
+                bytes: self.plan,
+                at: self.features.unwrap_or(self.plan.len()),
+            },
+            started: false,
+        }
+    }
+}
+
+/// Iterator over the `true` members of a plan's `features` object.
+pub struct Features<'a> {
+    reader: Reader<'a>,
+    started: bool,
+}
+
+impl<'a> Iterator for Features<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<&'a [u8]> {
+        let bytes = self.reader.bytes;
+        loop {
+            if !self.started {
+                self.started = true;
+                self.reader.expect(b'{').ok()?;
+                self.reader.whitespace();
+                if self.reader.peek() == Some(b'}') {
+                    return None;
+                }
+            } else {
+                self.reader.whitespace();
+                match self.reader.peek() {
+                    Some(b',') => self.reader.at += 1,
+                    _ => return None,
+                }
+            }
+            self.reader.whitespace();
+            let (start, end) = self.reader.string().ok()?;
+            self.reader.whitespace();
+            self.reader.expect(b':').ok()?;
+            self.reader.whitespace();
+            let value = self.reader.at;
+            self.reader.value_at_depth(1).ok()?;
+            if bytes[value..self.reader.at] == *b"true" {
+                return Some(&bytes[start..end]);
+            }
+        }
+    }
+}
+
+/// A worker's entry and required feature must agree. This check also applies
+/// to hosts that read a fixed host-input record instead of the complete plan.
+pub fn worker_declared(plan: &[u8]) -> Result<bool, PlanFactsError> {
+    let mut reader = Reader { bytes: plan, at: 0 };
+    reader.whitespace();
+    let root = reader.at;
+    let end = reader.value().map_err(|_| PlanFactsError::Malformed)?;
+    reader.at = end;
+    reader.whitespace();
+    if reader.at != plan.len() || plan.get(root) != Some(&b'{') {
+        return Err(PlanFactsError::Malformed);
+    }
+    let worker = find(plan, root, &[b"domains", b"worker"]);
+    let feature = find(plan, root, &[b"features", b"runtime.worker"])
+        .is_some_and(|start| plan[start..].starts_with(b"true"));
+    if worker.is_some() && !feature {
+        return Err(PlanFactsError::Malformed);
+    }
+    if let Some(worker) = worker {
+        let entry = find(plan, worker, &[b"entry"]).ok_or(PlanFactsError::Malformed)?;
+        if plan.get(entry) != Some(&b'"') || plan.get(entry + 1) == Some(&b'"') {
+            return Err(PlanFactsError::Malformed);
+        }
+    }
+    Ok(worker.is_some())
 }
 
 /// Read the plan's viewport, auxiliary surface and feature table.
@@ -74,13 +173,45 @@ pub fn plan_facts(plan: &[u8]) -> Result<PlanFacts<'_>, PlanFactsError> {
     };
     let features = find(plan, root, &[b"features"]).filter(|&start| plan[start] == b'{');
     let companions = find(plan, root, &[b"companions"]).is_some_and(|start| {
-        let mut reader = Reader { bytes: plan, at: start + 1 };
+        let mut reader = Reader {
+            bytes: plan,
+            at: start + 1,
+        };
         plan[start] == b'[' && {
             reader.whitespace();
             reader.peek() != Some(b']')
         }
     });
-    Ok(PlanFacts { viewport, auxiliary, companions, plan, features })
+    let tick_hz = find(plan, root, &[b"profile", b"tickHz"]).and_then(|start| {
+        let mut reader = Reader {
+            bytes: plan,
+            at: start,
+        };
+        reader.unsigned()
+    });
+    let animation = find(plan, root, &[b"animation"]).and_then(|start| text(plan, start));
+    let presentation =
+        find(plan, root, &[b"viewport", b"presentation"]).and_then(|start| text(plan, start));
+    Ok(PlanFacts {
+        viewport,
+        auxiliary,
+        companions,
+        tick_hz,
+        animation,
+        presentation,
+        plan,
+        features,
+    })
+}
+
+/// The raw bytes of the string value at `start`.
+fn text(plan: &[u8], start: usize) -> Option<&[u8]> {
+    let mut reader = Reader {
+        bytes: plan,
+        at: start,
+    };
+    let (from, to) = reader.string().ok()?;
+    Some(&plan[from..to])
 }
 
 fn find(plan: &[u8], mut object: usize, path: &[&[u8]]) -> Option<usize> {
@@ -88,7 +219,10 @@ fn find(plan: &[u8], mut object: usize, path: &[&[u8]]) -> Option<usize> {
         if plan.get(object) != Some(&b'{') {
             return None;
         }
-        let mut reader = Reader { bytes: plan, at: object };
+        let mut reader = Reader {
+            bytes: plan,
+            at: object,
+        };
         object = reader.member(key).ok()??.0;
     }
     Some(object)
@@ -97,12 +231,24 @@ fn find(plan: &[u8], mut object: usize, path: &[&[u8]]) -> Option<usize> {
 fn surface(plan: &[u8], object: usize) -> Option<PlanSurface> {
     let logical = find(plan, object, &[b"logical"])?;
     let density = find(plan, object, &[b"rasterDensity"])?;
-    let mut reader = Reader { bytes: plan, at: logical };
+    let mut reader = Reader {
+        bytes: plan,
+        at: logical,
+    };
     let (width, height) = reader.pair()?;
-    let mut reader = Reader { bytes: plan, at: density };
+    let mut reader = Reader {
+        bytes: plan,
+        at: density,
+    };
     let raster_density = reader.unsigned()?;
-    let valid = (1..=4096).contains(&width) && (1..=4096).contains(&height) && (1..=255).contains(&raster_density);
-    valid.then_some(PlanSurface { width, height, raster_density })
+    let valid = (1..=4096).contains(&width)
+        && (1..=4096).contains(&height)
+        && (1..=255).contains(&raster_density);
+    valid.then_some(PlanSurface {
+        width,
+        height,
+        raster_density,
+    })
 }
 
 struct Reader<'a> {
@@ -341,10 +487,21 @@ mod tests {
     #[test]
     fn reads_the_dual_screen_plan() {
         let facts = plan_facts(DUAL.as_bytes()).unwrap();
-        assert_eq!(facts.viewport, PlanSurface { width: 400, height: 240, raster_density: 1 });
+        assert_eq!(
+            facts.viewport,
+            PlanSurface {
+                width: 400,
+                height: 240,
+                raster_density: 1
+            }
+        );
         assert_eq!(
             facts.auxiliary,
-            Some(PlanSurface { width: 320, height: 240, raster_density: 1 })
+            Some(PlanSurface {
+                width: 320,
+                height: 240,
+                raster_density: 1
+            })
         );
         assert!(facts.feature("input.buttons"));
         assert!(facts.feature("text.glyphs.baked"));
@@ -359,7 +516,14 @@ mod tests {
         let plan = br#" { "companions" : [ "shell" ], "features" : { "ui.physics" : true } ,
             "viewport" : { "rasterDensity" : 2 , "logical" : [ 320 , 480 ] } } "#;
         let facts = plan_facts(plan).unwrap();
-        assert_eq!(facts.viewport, PlanSurface { width: 320, height: 480, raster_density: 2 });
+        assert_eq!(
+            facts.viewport,
+            PlanSurface {
+                width: 320,
+                height: 480,
+                raster_density: 2
+            }
+        );
         assert_eq!(facts.auxiliary, None);
         assert!(facts.feature("ui.physics"));
         assert!(facts.companions);
@@ -369,8 +533,14 @@ mod tests {
     fn refuses_what_it_cannot_read() {
         assert_eq!(plan_facts(b"").unwrap_err(), PlanFactsError::Malformed);
         assert_eq!(plan_facts(b"[]").unwrap_err(), PlanFactsError::Malformed);
-        assert_eq!(plan_facts(b"{\"viewport\":{}").unwrap_err(), PlanFactsError::Malformed);
-        assert_eq!(plan_facts(b"{} trailing").unwrap_err(), PlanFactsError::Malformed);
+        assert_eq!(
+            plan_facts(b"{\"viewport\":{}").unwrap_err(),
+            PlanFactsError::Malformed
+        );
+        assert_eq!(
+            plan_facts(b"{} trailing").unwrap_err(),
+            PlanFactsError::Malformed
+        );
         assert_eq!(plan_facts(b"{}").unwrap_err(), PlanFactsError::Viewport);
         assert_eq!(
             plan_facts(br#"{"viewport":{"logical":[400.5,240],"rasterDensity":1}}"#).unwrap_err(),
@@ -389,6 +559,28 @@ mod tests {
         deep.extend(std::iter::repeat_n(b'[', 100));
         deep.extend(std::iter::repeat_n(b']', 100));
         assert_eq!(plan_facts(&deep).unwrap_err(), PlanFactsError::Malformed);
+    }
+
+    #[test]
+    fn reads_rate_animation_presentation_and_enabled_features() {
+        let plan = br#"{"animation":"repaint","features":{"a.b":true,"c.d":false,"e.f":true},
+            "profile":{"id":"x","tickHz":30},"viewport":{"logical":[4,4],"presentation":"integer-fit","rasterDensity":1}}"#;
+        let facts = plan_facts(plan).unwrap();
+        assert_eq!(facts.tick_hz, Some(30));
+        assert_eq!(facts.animation, Some(&b"repaint"[..]));
+        assert_eq!(facts.presentation, Some(&b"integer-fit"[..]));
+        let enabled: std::vec::Vec<&[u8]> = facts.enabled_features().collect();
+        assert_eq!(enabled, [&b"a.b"[..], &b"e.f"[..]]);
+        let bare = plan_facts(br#"{"viewport":{"logical":[4,4],"rasterDensity":1}}"#).unwrap();
+        assert_eq!(
+            (bare.tick_hz, bare.animation, bare.presentation),
+            (None, None, None)
+        );
+        assert_eq!(bare.enabled_features().count(), 0);
+        let empty =
+            plan_facts(br#"{"features":{ },"viewport":{"logical":[4,4],"rasterDensity":1}}"#)
+                .unwrap();
+        assert_eq!(empty.enabled_features().count(), 0);
     }
 
     #[test]

@@ -1,9 +1,6 @@
 // @pocketjs/framework/link — the console's system link to a paired companion
 // (`globalThis.link`, contracts/spec/link.ts). Framework neutral: callers read
 // status() when they draw and subscribe to events with onLinkEvent().
-//
-// HTTP does not go through this module: on hosts whose net transport is the
-// link, `fetch` from @pocketjs/framework/net already rides it.
 
 import {
   LINK_PAIR_SCHEME,
@@ -13,7 +10,6 @@ import {
   type LinkCompanion,
   type LinkEvent,
   type LinkStatus,
-  LINK_SERVICES_ORIGIN,
 } from "../../contracts/spec/link.ts";
 import { registerServicePump } from "./services.ts";
 
@@ -29,6 +25,13 @@ export interface LinkOps {
   remove(appId: string): boolean;
   /** One JSON array with every event visible this tick. */
   poll(): string | undefined;
+  /** Pairing by a code the device shows (Pocket Link 2, docs/POCKET-LINK.md
+   *  §3.11), on a host that offers it: `pairOpen` makes a code and lists the
+   *  computers on the network in the status's `pair`, `pairAsk` asks one of
+   *  them, `pairClose` drops the code. */
+  pairOpen?(): boolean;
+  pairAsk?(hub: string): boolean;
+  pairClose?(): void;
 }
 
 export function linkHost(): LinkOps | null {
@@ -72,6 +75,8 @@ export function linkStatus(): LinkStatus {
       error: parsed.error ?? "",
       features: parsed.features ?? [],
       clock: parsed.clock ?? null,
+      // Pairing by a code: the member is there on a host that offers it.
+      ...(parsed.pair ? { pair: parsed.pair } : {}),
     };
   } catch {
     return { ...UNAVAILABLE, error: "link: malformed status" };
@@ -96,13 +101,6 @@ export function pairCompanion(uri: string): boolean {
 
 export function forgetCompanion(id: string): boolean {
   return linkHost()?.forget(id) ?? false;
-}
-
-/** The URL of a companion service (tools/companion/services.ts): `fetch` it
- *  like any other. The linked companion answers it with the owner's
- *  accounts and tools; the console never holds their credentials. */
-export function companionService(service: string, path = "/"): string {
-  return `${LINK_SERVICES_ORIGIN}/${service}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 /** Delete an installed app. The host refuses the running app and the launcher. */

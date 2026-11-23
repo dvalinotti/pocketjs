@@ -396,7 +396,7 @@ function AgentLayer(props: { host: AgentHostOps; ops: HostOps; appRoot: NodeMirr
     const table = appTable();
     const current = table?.current ?? "";
     const entry = table?.apps.find((candidate) => candidate.output === current);
-    return entry ? { id: entry.id, title: entry.title, output: entry.output } : { id: current, title: "Pocket Home", output: current };
+    return entry ? { id: entry.id, title: entry.title, output: entry.output } : { id: current, title: "Pocket Shell", output: current };
   };
   const hello = () => {
     const table = appTable();
@@ -1084,7 +1084,7 @@ function AgentLayer(props: { host: AgentHostOps; ops: HostOps; appRoot: NodeMirr
             Claude is offline
           </Text>
           <Text class="text-xs" style={{ posType: ENUMS.PosType.Absolute, insetL: 14, insetT: 40, width: CARD.w - 28, textColor: MUTED }}>
-            Open Pocket Companion on your Mac.
+            Open Pocket Hub on your Mac.
           </Text>
           <Text class="text-xs" style={{ posType: ENUMS.PosType.Absolute, insetL: 14, insetT: 72, textColor: MUTED }}>
             B to close

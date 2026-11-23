@@ -1,5 +1,6 @@
 import { repositoryPath } from "./repository.ts";
-import type { RuntimeApplication } from "../framework/src/runtime-config.ts";
+import { planProfileDocument } from "../framework/src/manifest/plan.ts";
+import type { RuntimeApplication } from "../framework/src/host-config.ts";
 import { applicationBundle, runProgramBuild } from "./build/programs/application.ts";
 import { writeHostProfileHeader } from "../tools/host-profile.ts";
 import { encodeSymbianNavigation } from "./symbian-navigation.ts";
@@ -505,7 +506,7 @@ export async function buildApp(
   const transaction = async () => {
     rmSync(payload, { recursive: true, force: true });
     mkdirSync(payload, { recursive: true });
-    writeHostProfileHeader(payload, plan.profile);
+    writeHostProfileHeader(payload, planProfileDocument(plan.profile));
     if (massStorageDataRoot !== undefined) {
       stageSymbianMassStorageData(massStorageDataRoot, payload);
     }
@@ -543,15 +544,15 @@ export async function buildApp(
     if (customCoreLibrary !== undefined) {
       copyFileSync(
         customCoreLibrary,
-        resolve(payload, "libpocketjs_symbian_core.a"),
+        resolve(payload, "libpocket_native_program.a"),
       );
     } else {
-      const coreDirectory = resolve(root, "programs/native/cabi");
+      const coreDirectory = resolve(root, "programs/native/runtime");
       const rustBuild = await spawn(rustHost.rustupPath!, [
         "run",
         rustHost.toolchainName!,
         "cargo",
-        "build", "--manifest-path", repositoryPath("programs/native/cabi/Cargo.toml"), "-p", "pocketjs-ui-cabi",
+        "build", "--manifest-path", repositoryPath("programs/native/runtime/Cargo.toml"), "-p", "pocket-native-program",
         "--release",
         "--locked",
         "--no-default-features",
@@ -577,9 +578,9 @@ export async function buildApp(
       copyFileSync(
         resolve(
           rustTarget,
-          "armv6-symbian-eabi/release/libpocketjs_symbian_core.a",
+          "armv6-symbian-eabi/release/libpocket_native_program.a",
         ),
-        resolve(payload, "libpocketjs_symbian_core.a"),
+        resolve(payload, "libpocket_native_program.a"),
       );
     }
 

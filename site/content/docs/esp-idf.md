@@ -69,39 +69,46 @@ pocketjs_embed_package(
     PROFILE_EXPORT_DIR "../profile-export")
 ```
 
-The firmware root contains `pocket.runtime-config.ts`, which imports the
-program's `defineProfile()` module. Generate the trusted profile before an
-offline build:
+The firmware root contains `pocket.host.config.ts`, the host config that
+names the program's host contract, `pocket.host.json`. Export the host contract
+before an offline build:
 
 ```sh
-pocket profile export --config pocket.runtime-config.ts --out profile-export
+pocket host export --config pocket.host.config.ts --out profile-export
 ```
 
 **The embed step uses Python and prebuilt artifacts; it does not invoke Bun.**
-The sidecar's exact canonical JSON, binding generation and profile hash must
-match the package. The generated `pocketjs_package_dashboard.h` exports package
+It reads the exported `pocket.host.json`, requires its `hostAbi` stamp to
+equal the package's binding generation, and admits the package's host-input
+variant by the [admission](/docs/platform-contracts/#admission) rules: raster
+density, animation class, rate against the cadences, viewport, presentation
+and capabilities. The generated `pocketjs_package_dashboard.h` exports package
 storage and admitted application geometry. `pocket_profile.h` supplies the
-independent program configuration.
+program's host contract facts, independent of the package.
 
-`pocketjs_compile_app(TARGET <target> NAME <name> MANIFEST <file>)` compiles an
-application and exports the profile. `pocketjs_profile_header(TARGET <target>
-NAME <name>)` exports the profile without an application. These two helpers
-require the Pocket CLI. Their dependency files track application imports and
-profile/configuration imports, including new modules learned on a rebuild.
+`pocketjs_compile_app(TARGET <target> NAME <name> MANIFEST <pocket.app.json>)`
+compiles an application and exports the host contract.
+`pocketjs_profile_header(TARGET <target> NAME <name>)` exports the host contract
+without an application. These two helpers require the Pocket CLI. Their
+dependency files track application imports, host contracts and host config
+imports, including new modules learned on a rebuild.
 
-All three helpers accept `RUNTIME_CONFIG`, defaulting to the project root's
-`pocket.runtime-config.ts`. `PROFILE_EXPORT_DIR` defaults to
+All three helpers accept `HOST_CONFIG`, defaulting to the project root's
+`pocket.host.config.ts`. `PROFILE_EXPORT_DIR` defaults to
 `<current-binary-directory>/pocketjs/<name>/profile`. Offline embedding requires
-`pocket-profile.json` and `pocket_profile.h` to exist there before configuration.
+`pocket.host.json` and `pocket_profile.h` to exist there before configuration.
 
 ## Register a runtime
 
 **`pocket_runtime_config.profile` points at `pocket_profile.facts`**, the
 `pocket_profile_facts` record in the exported `pocket_profile.h`: variant id,
-tick rate, panel sizes, logical viewports, raster density and the input classes
-the profile requires. The runtime copies the record at creation and reads no
-JSON. `pocket_runtime_create` returns `NULL` when `tick_hz` differs from the
-facts' tick rate. The CMake helpers add the `pocket_runtime` include directory,
+cadences, panel sizes, logical viewports, presentations, raster density,
+animation class, capability names and the input classes the host contract requires.
+The runtime copies the record at creation and reads no JSON.
+`pocket_runtime_create` returns `NULL` when the configuration's `tick_hz`
+differs from the facts' `tick_hz`, the highest cadence. After boot,
+`pocket_runtime_get_timing` reports the package rate, the cadence to schedule
+`pocket_runtime_tick` at, and the core ticks each call advances. The CMake helpers add the `pocket_runtime` include directory,
 which holds the `pocket_runtime.h` that `pocket_profile.h` includes.
 
 The following setup uses an initialized display adapter. Error handling must
@@ -140,6 +147,11 @@ pocket_memory_package package = {
 };
 ```
 
+The runtime reads the package in place, so the bytes stay unchanged until the
+runtime is destroyed. A program that verified the package itself, through
+`pocket_idf_package_open`, sets `.flags = POCKET_MEMORY_PACKAGE_VERIFIED` and
+the runtime admits it without a second hash pass.
+
 Check creation results, then check each registration result against
 `POCKET_STATUS_OK`:
 
@@ -152,12 +164,21 @@ pocket_runtime_add_display(runtime, pocket_display_esp_lcd_vtable(), display,
 
 Register each input device with `pocket_runtime_add_input_source`. Its
 `pocket_input_source_v1` declares input classes and contributes device facts
-during polling. Every input class required by the profile must be present.
+during polling. Every input class required by the host contract must be present.
 The runtime resolves contact hits and encodes the guest frame arguments.
 
 `pocket_runtime_boot` validates the package, installs its assets, evaluates the
-guest and presents the initial tree. `pocket_runtime_tick` runs one guest frame,
-advances the core and presents. A returned display or renderer failure has
+guest and presents the initial tree. A package built for a host contract that
+names `esp-idf-quickjs-ng-0.14.0` under `bytecode.engine` carries its bundles
+as that engine's serialized objects, which the guest reads instead of parsing
+source (docs/PLATFORM.md, "Bytecode"). The baked font atlases of a package the
+runtime reads in place stay in the package: their coverage cells are read from
+flash or PSRAM where they are, and a slot is copied only when a streaming font
+writes into it. Its images and sprites are decoded into PSRAM when first drawn;
+`pocket_runtime_set_texture_budget` bounds the decoded bytes kept past a frame,
+releasing the least recently drawn textures beyond it until a frame draws them
+again. `pocket_runtime_tick` runs one guest frame,
+advances the core by the package rate divided by the cadence, and presents. A returned display or renderer failure has
 terminated all device access for that frame. A guest failure stops further
 turns; read `pocket_guest_idf_error` for engine diagnostics.
 
@@ -195,9 +216,10 @@ separate from display pixel storage.
 
 ## Scheduling and destruction
 
-A product can call `pocket_runtime_tick` from its owner task. The optional
-`pocket_runner_start` takes the booted runtime, tick rate and task configuration.
-It uses the shared rational-microsecond schedule. Falling behind can skip wall
+A product can call `pocket_runtime_tick` from its owner task at the cadence
+`pocket_runtime_get_timing` reports. The optional `pocket_runner_start` takes
+the booted runtime, the task configuration and an output pointer; it schedules
+ticks at that cadence with the shared rational-microsecond schedule. Falling behind can skip wall
 clock slots without inventing guest frames.
 
 Set the runner's interrupt callback to `pocket_guest_idf_interrupt` through a
@@ -216,6 +238,136 @@ The generated guest protects borrowed PAK bytes using the verified QuickJS
 immutable-buffer patch. Package storage remains live until guest shutdown.
 The package and JavaScript heap limits do not bound all native allocations;
 display buffers and accelerator staging have their own budgets.
+
+## Native AOT applications
+
+**The components on this page boot `.pocket` packages; `pocket_runtime.h` has
+no entry for a compiled application.** `pocket_runtime_boot` and
+`pocket_runtime_boot_deferred` admit a package source. An application compiled
+by [MicroTS](/docs/microts/) links into the firmware as a Rust static library
+that the product owns. That library drives `pocket_runtime::Runtime` through
+its Rust API, and the product's repository holds every file of it.
+
+The library crate:
+
+- uses `no_std` with `alloc`, and depends on `microts` with the `runtime`
+  feature, `pocket-runtime`, `pocket-drivers` and `pocket-raster`;
+- includes the generated `include.rs`, which declares `mod generated`,
+  `TICK_HZ`, `load_fonts` and `load_images`;
+- implements `microts::runtime::AotApp`: `mount` loads `styles.bin`, the fonts
+  and the images and constructs the generated `AppApp`; `frame` converts a
+  `GuestFrame` into `microts::Input`;
+- registers an `AotGuest`, its input sources, `pocket_raster::RasterRenderer`
+  and a `DisplayOutput`, then calls `Runtime::boot_aot_deferred` with the
+  exported `PROFILE_HASH`, the viewport and `TICK_HZ`;
+- defines the global allocator over the IDF heap, the panic handler and the
+  `extern "C"` functions its C caller uses.
+
+[`programs/ipodnano/src/lib.rs`](https://github.com/pocket-nexus/pocketjs/blob/main/programs/ipodnano/src/lib.rs)
+is a complete library of this shape for the iPod nano's Rockbox firmware.
+**The C display and input components register through `pocket_runtime.h`**,
+so an AOT library supplies Rust implementations of `DisplayOutput` and
+`InputSource` from `pocket-drivers`.
+
+### Build the library
+
+The host config declares an `aot` recipe. `pocket build` checks the generated
+sources against the host contract, exports the profile and runs Cargo with
+`POCKETJS_AOT_DIR`, `POCKETJS_AOT_INCLUDE` and `POCKETJS_PROFILE_RS` set:
+
+```ts
+// pocket.host.config.ts
+import { cargo, defineHostConfig } from "@pocketjs/framework/host-config";
+
+export default defineHostConfig({
+  host: "./pocket.host.json",
+  build: {
+    hosts: ["darwin-arm64", "linux-x64"],
+    input: "aot",
+    steps: cargo({
+      manifest: "firmware/Cargo.toml",
+      target: "riscv32imafc-unknown-none-elf",
+      targetDirectory: "{outdir}/cargo",
+    }),
+    artifact: "{outdir}/cargo/riscv32imafc-unknown-none-elf/release/libfirmware.a",
+  },
+});
+```
+
+```sh
+pocket compile --manifest app/pocket.app.json --project-root app \
+  --target ./pocket.host.json --aot --out dist/aot
+pocket build --config pocket.host.config.ts --aot-dir dist/aot --out dist/build
+```
+
+The crate's `build.rs` calls `pocket_profile_build::emit`, which copies the
+exported profile to `OUT_DIR/pocket_profile.rs`. The library includes that
+file and `$POCKETJS_AOT_DIR/include.rs`. **The Cargo step passes `--locked`**:
+commit the crate's `Cargo.lock`. A `toolchain` field on the step names the
+rustup toolchain that has the target installed.
+
+The IDF component that calls the library imports the archive and keeps the
+hooks the archive calls back into:
+
+```cmake
+add_library(firmware STATIC IMPORTED GLOBAL)
+set_target_properties(firmware PROPERTIES IMPORTED_LOCATION "${FIRMWARE_ARCHIVE}")
+target_link_libraries(${COMPONENT_LIB} PUBLIC firmware)
+target_link_options(${COMPONENT_LIB} INTERFACE
+    "-Wl,--undefined=firmware_alloc" "-Wl,--undefined=firmware_free"
+    "-Wl,--undefined=firmware_panic")
+```
+
+An application project outside a framework checkout declares
+`@pocketjs/framework` and `solid-js` or `vue` in its own `package.json`, as
+`pocket create` writes them. AOT analysis resolves the view framework and
+framework subpaths such as `@pocketjs/framework/animation` through the
+project's `node_modules`; a missing package fails with `Cannot find module`.
+
+### Targets
+
+| IDF target | Rust target | Requirement |
+| --- | --- | --- |
+| `esp32p4` | `riscv32imafc-unknown-none-elf` | Remove the soft-float compiler-rt members from the archive |
+| `esp32c6` | `riscv32imac-unknown-none-elf` | None |
+| `esp32c3` | `riscv32imc-unknown-none-elf` | Select an atomic compare-and-swap fallback |
+| `esp32s3` | `xtensa-esp32s3-none-elf` | Espressif's Rust toolchain with `buildStd: ["core", "alloc"]` |
+
+**A `riscv32imafc` static library carries compiler-rt objects built for the
+soft-float ABI; IDF's ESP32-P4 objects use `ilp32f`.** IDF's libgcc and ROM
+supply the same symbols, and the linker rejects a soft-float object that it
+extracts into an `ilp32f` link.
+`platforms/esp-idf/pocket_runtime/prepare_archive.cmake` deletes those archive
+members; run it with `-DPOCKETJS_ARCHIVE`, `-DPOCKETJS_ARCHIVER` and
+`-DPOCKETJS_TARGET=esp32p4` before the IDF link.
+
+**`riscv32imc` has no atomic compare-and-swap instruction.** `portable-atomic`
+stops the build with `dependents require atomic CAS but not available on this
+target by default`. The library enables the `critical-section` feature of
+`microts` and provides a `critical_section::Impl`, or sets the
+`portable_atomic_unsafe_assume_single_core` cfg in its rustflags. The
+`microts` crate documentation states the requirements of each choice.
+
+### Memory and stack
+
+**IDF's main task stack defaults to 3584 bytes**
+(`CONFIG_ESP_MAIN_TASK_STACK_SIZE`). The iPod nano program gives its Runtime
+128 KiB because an 8 KiB stack did not hold a layout solve. Create a task with
+its own stack for the Runtime.
+
+**The generated `load_fonts` and `load_images` copy their data into the
+heap.** `Ui::load_font_atlas` parses each atlas into an owned buffer and
+`upload_texture` copies the pixels, while the `include_bytes!` originals stay
+in flash. A library that needs the atlases in place writes its own loader
+over `load_font_atlas_shared`. A `DisplayOutput` that keeps a full frame, as
+the iPod nano program's does, holds two bytes per RGB565 pixel: 153,600 bytes
+at 320 × 240.
+
+**The image embeds the application.** A changed view or model is a new
+firmware image; an AOT guest rejects a package's JavaScript payload.
+
+**The repository contains no ESP32 AOT program and no CI job for this path.**
+Device timing, pixels and input are the product's acceptance checks.
 
 ## Validation
 

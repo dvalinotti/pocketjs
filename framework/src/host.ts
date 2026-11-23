@@ -166,7 +166,7 @@ export interface HostOps {
    *  ascending UTF-16 code-unit indices, empty = the line fits. The engine
    *  computes greedy word wrap over the same provider that measures and
    *  paints the slot; native-text backends may install the host text
-   *  system's wrapper (gpui LineWrapper) whose positions win. Optional:
+   *  system's wrapper whose positions win. Optional:
    *  hosts that predate it — apps fall back to matching greedy rules over
    *  measureText. */
   wrapText?(str: string, fontSlot: number, maxW: number): number[];
@@ -213,6 +213,13 @@ export interface HostOps {
   /** Stop audio, close the stream, free the plane. */
   videoClose?(): void;
 
+  // -- text sessions. Optional: a host whose keyboard is somewhere else (a
+  //    handheld's lower panel, a system keyboard) shows it while a text
+  //    field's keyboard session is open and sends input.text events; the
+  //    on-screen keyboard's controller calls it (osk-controller.ts). ----
+  /** A text field's keyboard session opened (true) or closed (false). */
+  textSession?(open: boolean): void;
+
   // -- DevTools ops (spec ops 18..22, docs/DEVTOOLS.md). Optional: debug-only,
   //    default-off; hosts that predate them (e.g. pocket-mod) simply lack
   //    them and the shim feature-detects. ---------------------------------
@@ -234,6 +241,9 @@ export interface HostOps {
   __dbgConnected?(): boolean;
   __dbgPoll?(): string | undefined;
   __dbgSend?(line: string): void;
+  /** One console line of the guest for the host's own log path (the 3DS's
+   *  `runtime.logs` over Pocket Link 2), whether a panel listens or not. */
+  __dbgLog?(level: string, text: string): void;
   /** On-demand native screenshot. The host transports bulk pixels outside
    *  the JSON control channel and its bridge converts them to PNG. */
   __dbgShot?(): boolean;
@@ -244,9 +254,9 @@ export interface HostOps {
   debugStats?(): string;
 
   // -- app switching (spec ops 39..41, docs/LAUNCHER.md). Optional: only
-  //    multi-app hosts (the launcher EBOOT, programs/sim's launcher runner)
-  //    implement them; @pocketjs/framework/launcher feature-detects and the
-  //    launcher app degrades to its empty state elsewhere. -----------------
+  //    multi-app hosts implement them; @pocketjs/framework/launcher
+  //    feature-detects, and a launcher guest degrades to its empty state
+  //    elsewhere. ---------------------------------------------------------
   /** OP.appTable — JSON { apps: [{output, id, title}], current, resume }. */
   appTable?(): string;
   /** OP.appLaunch — request a whole-guest switch to `output` after the
@@ -280,7 +290,7 @@ export interface HostOps {
   __auxiliarySurface?: { readonly root: number; readonly w: number; readonly h: number };
 }
 
-/** Desktop hosts publish their logical UI size as `ui.__viewport` (the core
+/** Resizable hosts publish their logical UI size as `ui.__viewport` (the core
  *  is resized to it at mount); console hosts omit it — the spec screen is
  *  the viewport. One accessor so every consumer reads the same contract. */
 export function hostViewport(ops: HostOps): { w: number; h: number } | null {
@@ -288,6 +298,32 @@ export function hostViewport(ops: HostOps): { w: number; h: number } | null {
     (ops as HostOps & { __viewport?: { w: number; h: number } }).__viewport ??
     null
   );
+}
+
+/** Subscribers to the logical viewport size (`onViewport`). */
+const viewportListeners = new Set<(w: number, h: number) => void>();
+
+/**
+ * Tell app code that the logical viewport is now `w` × `h`. Each framework
+ * entry calls this at the end of its `resizeViewport`, after the root layers
+ * and `ui.__viewport` carry the new size, so a listener that lays out from
+ * `hostViewport` reads the size it was called with.
+ */
+export function publishViewport(w: number, h: number): void {
+  for (const listener of [...viewportListeners]) listener(w, h);
+}
+
+/**
+ * Call `listener` with the new logical size on every live-viewport resize.
+ * Returns the function that removes it. A host without
+ * `display.viewport.live` never calls it: the size an app mounted at is the
+ * size it keeps.
+ */
+export function onViewport(listener: (w: number, h: number) => void): () => void {
+  viewportListeners.add(listener);
+  return () => {
+    viewportListeners.delete(listener);
+  };
 }
 
 export interface Host {
@@ -310,9 +346,11 @@ export function embeddedBuildHostContract(): BuildHostContract | null {
   return target ? { target, hostAbi } : null;
 }
 
-/** Fail before mounting when a bundle was packaged with the wrong native
- *  host, or baked for a tick rate the host does not drive. The rate check
- *  runs for every native mount — plan-less bundles bake a rate too. */
+/** Fail before mounting when a bundle was packaged for another binding
+ *  generation, or baked for a tick rate the host does not drive. The rate
+ *  check runs for every native mount — plan-less bundles bake a rate too.
+ *  The host's profile id is not compared: device admission decides which
+ *  hosts run a package (contracts/spec/admission.ts). */
 export function assertNativeHostContract(
   ops: HostOps,
   expected: BuildHostContract | null = embeddedBuildHostContract(),
@@ -345,11 +383,8 @@ export function assertNativeHostContract(
         "contracts — add __host/__hostAbi to its ui namespace (see framework/src/host.ts HostOps)",
     );
   }
-  if (ops.__host !== expected.target) {
-    throw new Error(
-      `PocketJS: native target mismatch (bundle=${expected.target}, host=${ops.__host})`,
-    );
-  }
+  // The device admitted this package against its profile facts; the host's
+  // profile id is provenance and need not equal the compiled one.
 }
 
 /**
@@ -415,6 +450,13 @@ export function getHost(): Host {
 
 export function getOps(): HostOps {
   return getHost().ops;
+}
+
+/** The active host's ops, or null before render() installed one: for a
+ *  controller that works without a host (the keyboard session in a unit
+ *  test) and asks the host for an optional service. */
+export function peekOps(): HostOps | null {
+  return current?.ops ?? null;
 }
 
 const APP_ACTION_NAME = /^[a-z][a-z0-9_.-]{0,62}$/;

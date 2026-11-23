@@ -9,9 +9,12 @@ static const pocket_profile_display pocket_3ds_profile_display = {sizeof(pocket_
 static const uint32_t pocket_3ds_profile_auxiliary_logical[] = {320u, 240u};
 /* struct_size, physical, logical, logical_count, raster_density */
 static const pocket_profile_display pocket_3ds_profile_auxiliary = {sizeof(pocket_profile_display), {320u, 240u}, pocket_3ds_profile_auxiliary_logical, 1u, 1u};
-/* struct_size, id, id_length, tick_hz, input_classes, display, auxiliary, dynamic_viewport */
-static const pocket_profile_facts pocket_3ds_profile = {sizeof(pocket_profile_facts), (const uint8_t *)"\x33\x64\x73\x2d\x64\x65\x76", 7u, 60u, 19u, &pocket_3ds_profile_display, &pocket_3ds_profile_auxiliary, NULL};
-static const uint8_t pocket_3ds_profile_hash[32] = {171,53,54,24,40,188,112,142,169,57,192,106,116,5,208,65,172,222,182,92,68,56,215,12,234,92,249,81,86,127,103,137};
+static const uint32_t pocket_3ds_profile_cadences[] = {60u};
+/* struct_size, id, id_length, tick_hz (highest cadence), input_classes, display, auxiliary, dynamic_viewport,
+ * cadences, cadence_count, capabilities, capabilities_length, presentations, presentations_length, animation, animation_length */
+static const pocket_profile_facts pocket_3ds_profile = {sizeof(pocket_profile_facts), (const uint8_t *)"\x33\x64\x73\x2d\x64\x65\x76", 7u, 60u, 19u, &pocket_3ds_profile_display, &pocket_3ds_profile_auxiliary, NULL,
+    pocket_3ds_profile_cadences, 1u, (const uint8_t *)"camera.photo\0" "camera.qr\0" "data.fs\0" "display.auxiliary\0" "input.analog.left\0" "input.analog.right\0" "input.buttons\0" "input.cursor\0" "input.touch.auxiliary\0" "io.offload\0" "link.channel\0" "link.companion\0" "media.local\0" "media.playback\0" "net.http\0" "runtime.worker\0" "system.agent\0" "system.extension\0" "system.wifi\0" "text.glyphs.baked\0" "ui.physics\0", 296u, (const uint8_t *)"native\0", 7u, (const uint8_t *)"composited", 10u};
+static const uint8_t pocket_3ds_profile_hash[32] = {127,209,199,145,118,131,34,73,80,19,18,227,81,92,54,221,82,138,182,64,237,251,168,81,203,41,175,22,147,20,128,212};
 #define POCKET_3DS_OP_createNode 1u
 #define POCKET_3DS_OP_destroyNode 2u
 #define POCKET_3DS_OP_insertBefore 3u

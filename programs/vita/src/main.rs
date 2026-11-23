@@ -117,7 +117,9 @@ unsafe fn boot_guest(app_index: usize, active: &Option<Arc<Bundle>>) -> Result<R
         match switch::guest(app_index) {
             Ok(switch::GuestBytes::Package(bytes)) => runtime.eval_package(bytes),
             #[cfg(feature="runtime")]
-            Ok(switch::GuestBytes::File) => runtime.eval_source(pocketjs_vita::package_file::source()?),
+            // A missing app.pocket must still reach the shutdown below: a `?` here would drop
+            // the runtime with its guest still marked active, and every later push would fail.
+            Ok(switch::GuestBytes::File) => pocketjs_vita::package_file::source().and_then(|source| runtime.eval_source(source)),
             Err(error) => Err(error),
         }
     };
@@ -137,14 +139,14 @@ fn embedded_hash(app_index: usize) -> String {
                 #[cfg(feature="runtime")]
                 switch::GuestBytes::File => return None,
                 switch::GuestBytes::Package(bytes) => {
-                    let package = pocketjs_core::package::Package::parse(bytes, false).ok()?;
+                    let package = pocket_package::package::Package::parse(bytes, false).ok()?;
                     let variant = package.find_variant("vita").ok()??;
                     (
                         variant
-                            .section(pocketjs_core::package::section::JS)
+                            .section(pocket_package::package::section::JS)
                             .ok()??,
                         variant
-                            .section(pocketjs_core::package::section::PAK)
+                            .section(pocket_package::package::section::PAK)
                             .ok()?
                             .unwrap_or(&[]),
                     )
@@ -153,7 +155,7 @@ fn embedded_hash(app_index: usize) -> String {
             let js = js.strip_suffix(&[0]).unwrap_or(js);
             Some(format!(
                 "{:016x}",
-                pocketjs_core::package::fnv1a64(&[js, pak])
+                pocket_package::package::fnv1a64(&[js, pak])
             ))
         })
         .unwrap_or_else(|| "unavailable".into())
@@ -218,8 +220,9 @@ unsafe fn run_guest(app_index: usize, dev: &mut dev::Host) -> usize {
             buttons &= !(spec::btn::SELECT as i32);
         }
 
+        let advance_at = pocketjs_vita::frame_timing::now_us();
         if let Some(guest) = runtime.as_mut() {
-            if let Err(error) = guest.frame_with_input(
+            let result = guest.frame_with_input(
                 buttons,
                 if dev.menu.visible {
                     spec::ANALOG_CENTER as i32
@@ -227,7 +230,9 @@ unsafe fn run_guest(app_index: usize, dev: &mut dev::Host) -> usize {
                     analog
                 },
                 &touches,
-            ) {
+            );
+            pocketjs_vita::frame_timing::add(0, pocketjs_vita::frame_timing::now_us() - advance_at);
+            if let Err(error) = result {
                 runtime.take().unwrap().shutdown();
                 switch::cancel_pending();
                 if let Some((request, previous, hash)) = pending.take() {
@@ -265,6 +270,7 @@ unsafe fn run_guest(app_index: usize, dev: &mut dev::Host) -> usize {
                 request.finish(Ok(serde_json::json!({"generation":dev.generation,"bundle":dev.active_hash,"frame":current_frame,"nativeBuild":dev::NATIVE_BUILD})));
             }
         }
+        pocketjs_vita::frame_timing::end_frame();
         dev.publish(GLOBAL_FRAME, switch::APPS[app_index].output);
         #[cfg(feature = "bench")]
         if let Err(error) = benchmark.end(GLOBAL_FRAME) {

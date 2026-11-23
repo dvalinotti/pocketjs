@@ -1,6 +1,6 @@
 import { POCKET_BINDING_GENERATION } from "../contracts/spec/binding-generation.ts";
-import softwareProfile from "../profiles/ios-dev.ts";
-import { targetProfile } from "../profiles/contract.ts";
+import { POCKET_PROFILES } from "../hosts/index.ts";
+import { targetProfile } from "../hosts/contract.ts";
 import {
   POCKET_CAPABILITIES,
   definePlatformContractRegistry,
@@ -8,6 +8,7 @@ import {
 } from "../contracts/spec/platforms.ts";
 import type { ResolvedBuildPlan } from "../framework/src/manifest/plan.ts";
 import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.ts";
+const softwareProfile = POCKET_PROFILES["ios-dev"];
 
 /**
  * Transitional modern-iOS profile used only by `pocket ios`.
@@ -18,7 +19,7 @@ import { validateAndResolveBuildPlan } from "../framework/src/manifest/resolve.t
  * NativeScript layout today), so the form is "embedded": the 480x272 logical
  * viewport is fixed and the view letterboxes it with aspect-fit. The native
  * host publishes this identity via pocket_apple_set_identity
- * (engine/ios/uikit/PocketSurfaceView.m), and external-guest hosts publish
+ * (platforms/apple/uikit/PocketSurfaceView.m), and external-guest hosts publish
  * the same pair on the ui namespace they mount — all three must agree.
  *
  * Raster density is the surface's raster scale (PocketSurfaceView clamps
@@ -47,11 +48,8 @@ export function iosDevContracts(rasterDensity: number = IOS_DEV_DEFAULT_DENSITY)
     defineTargetRegistry({
       [IOS_DEV_TARGET_ID]: targetProfile({
         ...softwareProfile,
-        display: {
-          ...softwareProfile.display,
-          physicalViewport: [width * rasterDensity, height * rasterDensity],
-          rasterDensity,
-        },
+        display: { ...softwareProfile.display, rasterDensity },
+        panel: { primary: [width * rasterDensity, height * rasterDensity] },
       }),
     }),
   );

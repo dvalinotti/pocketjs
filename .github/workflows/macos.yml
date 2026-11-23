@@ -1,64 +1,31 @@
 name: macOS portable renderer
 
-# Native GPU and WASM software rendering share the Rust DrawList core. Text executes in
-# bounded worker adapters; neither host depends on the legacy gpui backend.
+# Exercise Metal rendering for the shared UI renderer used by widgets and Pocket3D.
 
 on:
   pull_request:
     paths: &paths
       - ".bun-version"
       - ".github/workflows/macos.yml"
-      - "contracts/spec/**"
-      - "contracts/schema/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - "engine/core/**"
       - "engine/spec/**"
       - "engine/drivers/**"
       - "engine/raster/**"
-      - "engine/present/**"
       - "engine/package/**"
       - "engine/modules/media/**"
-      - "engine/render/draw-ops/**"
-      - "engine/render/glyph-pages/**"
-      - "engine/crates/pocket-ui-surface/**"
-      - "engine/crates/pocket-text/**"
-      - "framework/src/text-layout.ts"
-      - "framework/src/offload.ts"
-      - "platforms/web/*offload*.js"
-      - "platforms/web/text-*"
-      - "tools/*offload*"
-      - "tools/companion-session.ts"
-      - "tests/offload-provider.test.ts"
-      - "tests/companion-session.test.ts"
-      - "tests/fixtures/offload-ready-worker.ts"
-      - "tools/text-*"
-      - "tests/text-layout-client.test.ts"
-      - "apps/text-offload/**"
-      - "programs/web/wasm/**"
-      - "programs/desktop/**"
-      - "engine/crates/pocket-ui-wgpu/**"
-      - "devices/web/pocket-web-render/**"
+      - "engine/render/Cargo.toml"
+      - "engine/render/src/**"
+      - "engine/ui-surface/**"
+      - "engine/text/**"
+      - "engine/ui-wgpu/**"
       - "engine/runtime/**"
       - "engine/guest-rquickjs/**"
       - "engine/pocket3d/crates/pocket3d/**"
-      - "tools/macos.ts"
-      - "framework/src/components*.ts*"
-      - "framework/src/host.ts"
-      - "framework/src/native-tree.ts"
-      - "framework/src/primitives.ts"
+      - "devices/wgpu/pocket-wgpu-render/**"
       - "framework/src/manifest/**"
-      - "platforms/web/wasm-ops.js"
-      - "programs/web/app-instance.*"
-      - "programs/web/system-engine.js"
-      - "apps/note/**"
-      - "framework/compiler/**"
-      - "assets/fonts/**"
-      - "tests/platform-contracts.test.ts"
-      - "tests/note.test.ts"
-      - "tests/pocket-system.test.ts"
-      - "tests/web-system-host.test.ts"
-      - "tests/font-bake.test.ts"
-      - "tests/npm-package.test.ts"
-      - "package.json"
   push:
     branches: [main]
     paths: *paths
@@ -67,9 +34,13 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
-    name: portable renderer + text worker + host
+    name: Metal renderer
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -81,65 +52,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ steps.rust-pin.outputs.version }}
-          components: clippy, rustfmt
-          # note.test.ts boots the sim host with the prebuilt wasm core.
+          components: clippy
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: .bun-version
-
-      - name: Install JS dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Build note sim prerequisites
-        run: |
-          bun tools/wasm.ts
-          bun tools/build.ts note-main
-
-      - name: Contract + System + note + platform + npm package tests
-        run: bun test tests/platform-contracts.test.ts tests/pocket-system.test.ts tests/web-system-host.test.ts tests/text-layout-client.test.ts tests/offload.test.ts tests/offload-provider.test.ts tests/companion-session.test.ts tests/note.test.ts tests/font-bake.test.ts tests/npm-package.test.ts && bun tests/contract.ts
-
-      - name: Compile the note against macos-app (plan + bundle + pak)
-        run: |
-          bun -e '
-          import { validateAndResolveBuildPlan } from "./framework/src/manifest/resolve.ts";
-          import { mkdirSync } from "node:fs";
-          const m = await Bun.file("apps/note/pocket.json").json();
-          const r = validateAndResolveBuildPlan(m, { target: "macos-app" });
-          if (!r.ok) throw new Error(JSON.stringify(r.diagnostics));
-          mkdirSync(".pocket/macos-app", { recursive: true });
-          await Bun.write(".pocket/macos-app/note-main.plan.json", JSON.stringify(r.plan, null, 2) + "\n");'
-          bun tools/build.ts --plan=.pocket/macos-app/note-main.plan.json
-
-      - name: Test core (TEXT_RUN + native measure gates)
-        run: cargo test --locked --manifest-path Cargo.toml -p pocketjs-core
-
-      - name: Test ui surface (svcOpen deny-by-default, string ops)
-        run: cargo test --locked --manifest-path Cargo.toml -p pocket-ui-surface
-
-      - name: rustfmt
-        run: |
-          cargo fmt --check --manifest-path Cargo.toml -p pocket-text
-          cargo fmt --check --manifest-path Cargo.toml -p pocket-desktop-host
-
-      - name: Portable text and WASM tests
-        run: |
-          cargo test --locked --manifest-path Cargo.toml -p pocket-text
-          cargo test --locked --manifest-path Cargo.toml -p pocketjs-wasm
-          bun tools/text-wasm.ts
-
-      - name: Clippy native desktop host
-        run: cargo clippy --locked --manifest-path Cargo.toml -p pocket-desktop-host --no-deps -- -D warnings
-
-      - name: Test Metal DrawList rendering and frame leases
-        run: |
-          cargo test --locked --manifest-path Cargo.toml -p pocket-ui-wgpu
-          cargo test --locked --manifest-path Cargo.toml -p pocket-desktop-host -- --include-ignored
-
-      - name: Build macos-app host
-        run: cargo build --locked --manifest-path Cargo.toml -p pocket-desktop-host
+      - name: Test Metal DrawList rendering
+        run: cargo test --locked --manifest-path Cargo.toml -p pocket-ui-wgpu -p pocket-wgpu-render -- --include-ignored

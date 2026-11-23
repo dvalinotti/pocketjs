@@ -91,7 +91,7 @@ test("status and tracks are parsed and validated", () => {
 
 const probeManifest = (requires: string[]) => ({
   $schema: "https://pocketjs.dev/schema/pocket-2.json",
-  pocket: 2, id: "dev.example.probe", name: "probe", title: "Probe", version: "0.1.0",
+  pocket: 2, id: "dev.example.probe", title: "Probe", version: "0.1.0",
   engine: { capabilities: { requires: ["text.glyphs.baked", "input.buttons", "display.auxiliary", ...requires] } },
   app: {
     entry: "app/main.tsx", output: "probe-main", framework: "solid",

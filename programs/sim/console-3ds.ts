@@ -16,7 +16,6 @@ import { bootBundle, type BundleWorld, type SimNode, type SimSurface } from "./s
 import { createSimLinkHost, type SimInstalledApp, type SimLinkFixture, type SimLinkHost } from "../../platforms/sim/link.ts";
 import { createSimWifiHost, type SimWifiFixture, type SimWifiHost } from "../../platforms/sim/wifi.ts";
 import { createSimCameraHost, type SimCameraHost, type SimCameraOptions } from "../../platforms/sim/camera.ts";
-import { createSimNetHost, type SimNetHost, type SimNetRoute } from "../../platforms/sim/net.ts";
 import { createSimAgentHost, type SimAgentHost } from "../../platforms/sim/agent.ts";
 import type { AgentDisplay } from "../../contracts/spec/agent.ts";
 
@@ -30,7 +29,7 @@ export interface Console3dsOptions {
   pak?: string;
   /** Installed mini-apps (the launcher's own entry is not among them). */
   apps?: Console3dsApp[];
-  /** Output name of the system launcher. Default "home-main". */
+  /** Output name of the system launcher. Default "pocket-shell". */
   launcher?: string;
   /** Output name of the running bundle. Default: the launcher. */
   current?: string;
@@ -40,16 +39,19 @@ export interface Console3dsOptions {
   wifi?: SimWifiFixture | null;
   /** Mount the camera module (default true); an object seeds its photos. */
   camera?: boolean | SimCameraOptions;
-  /** NET routes; omitted = no NET module. */
-  net?: Readonly<Record<string, SimNetRoute>>;
   /** Mount the agent namespace (contracts/spec/agent.ts); omitted = none. */
   agent?: { available?: boolean; display?: AgentDisplay };
   /** Virtual epoch at boot, ms. Default 2026-10-19T01:41:00Z. */
   epochMs?: number;
   /** The auxiliary surface's logical size: the touch screen of a launcher
    *  host. Default BOTTOM_SCREEN; an adaptive applet runs at others (the
-   *  M5Stack Tab5 offers 360x592). */
-  auxiliary?: [number, number];
+   *  M5Stack Tab5 offers 360x592). Null: a single-screen host without touch
+   *  (a PSP), where an applet draws its full-screen presentation on the
+   *  primary display. */
+  auxiliary?: [number, number] | null;
+  /** The primary display's logical size. Default TOP_SCREEN; a PSP is
+   *  [480, 272]. */
+  primary?: [number, number];
 }
 
 export interface Console3ds {
@@ -57,7 +59,6 @@ export interface Console3ds {
   link: SimLinkHost | null;
   wifi: SimWifiHost | null;
   camera: SimCameraHost | null;
-  net: SimNetHost | null;
   agent: SimAgentHost | null;
   /** The table appTable() reports. */
   apps: Console3dsApp[];
@@ -128,7 +129,7 @@ function flatTexts(node: SimNode | null, size: [number, number], out: string[], 
 }
 
 export async function bootConsole3ds(options: Console3dsOptions): Promise<Console3ds> {
-  const launcher = options.launcher ?? "home-main";
+  const launcher = options.launcher ?? "pocket-shell";
   const apps: Console3dsApp[] = (options.apps ?? []).map((app) => ({ ...app }));
   const launches: string[] = [];
   const current = options.current ?? launcher;
@@ -147,7 +148,6 @@ export async function bootConsole3ds(options: Console3dsOptions): Promise<Consol
   });
   const wifiHost = options.wifi === null ? null : createSimWifiHost(options.wifi ?? {});
   const cameraHost = options.camera === false ? null : createSimCameraHost(typeof options.camera === "object" ? options.camera : {});
-  const netHost = options.net ? createSimNetHost(options.net) : null;
   const agentHost = options.agent ? createSimAgentHost(options.agent) : null;
 
   let epoch = options.epochMs ?? DEFAULT_EPOCH;
@@ -161,12 +161,12 @@ export async function bootConsole3ds(options: Console3dsOptions): Promise<Consol
     }
   };
 
-  const touchScreen = options.auxiliary ?? BOTTOM_SCREEN;
+  const touchScreen = options.auxiliary === null ? null : options.auxiliary ?? BOTTOM_SCREEN;
+  const primary = options.primary ?? TOP_SCREEN;
   const g = globalThis as Record<string, unknown>;
   g.link = linkHost?.ns;
   g.wifi = wifiHost?.ns;
   g.camera = cameraHost?.ns;
-  g.net = netHost?.ns;
   g.agent = agentHost?.ns;
 
   // The bundle evaluates after bootBundle's first await, so the virtual
@@ -175,7 +175,7 @@ export async function bootConsole3ds(options: Console3dsOptions): Promise<Consol
   const booting = bootBundle({
       js: options.js,
       pak: options.pak,
-      viewport: { width: TOP_SCREEN[0], height: TOP_SCREEN[1], auxiliary: touchScreen },
+      viewport: { width: primary[0], height: primary[1], ...(touchScreen ? { auxiliary: touchScreen } : {}) },
       ops(ops) {
         ops.appTable = () =>
           JSON.stringify({
@@ -208,7 +208,6 @@ export async function bootConsole3ds(options: Console3dsOptions): Promise<Consol
     epoch += 1000 / world.hz;
     linkHost?.tick();
     wifiHost?.tick();
-    netHost?.tick();
     if (!ok) throw new Error(`${world.failure?.message}\n${world.failure?.stack}`);
     Date.now = () => epoch;
     try {
@@ -226,7 +225,6 @@ export async function bootConsole3ds(options: Console3dsOptions): Promise<Consol
     link: linkHost,
     wifi: wifiHost,
     camera: cameraHost,
-    net: netHost,
     agent: agentHost,
     apps,
     launches,
@@ -256,10 +254,12 @@ export async function bootConsole3ds(options: Console3dsOptions): Promise<Consol
       await step({ text: [{ key: name, pressed: false }] });
       await run(settle);
     },
-    texts: (surface = "primary") => flatTexts(world.tree(surface), surface === "auxiliary" ? touchScreen : TOP_SCREEN, []),
+    texts: (surface = "primary") => flatTexts(world.tree(surface), surface === "auxiliary" && touchScreen ? touchScreen : primary, []),
     tree: (surface = "primary") => world.tree(surface),
-    locate: (text, surface = "auxiliary") => locateText(world.tree(surface), text, surface === "auxiliary" ? touchScreen : TOP_SCREEN),
+    locate: (text, surface = touchScreen ? "auxiliary" : "primary") =>
+      locateText(world.tree(surface), text, surface === "auxiliary" && touchScreen ? touchScreen : primary),
     async tapText(text) {
+      if (!touchScreen) throw new Error("console-3ds: this console has no touch screen");
       const rect = locateText(world.tree("auxiliary"), text, touchScreen);
       if (!rect) throw new Error(`console-3ds: "${text}" is not on the bottom screen`);
       const x = Math.max(1, Math.min(touchScreen[0] - 2, rect[0] + Math.min(rect[2], 40) / 2));

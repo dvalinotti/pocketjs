@@ -14,6 +14,10 @@
 //! memory model from docs/DESIGN.md "Memory (the blocker fix)".
 
 extern crate alloc;
+// The archive's symbol shells define the pocket_runtime_op and
+// pocket_runtime_supports_op the C guest calls (external-runtime: no
+// allocator or panic handler of its own).
+use pocket_archive as _;
 
 mod allocator;
 pub use pocket_psp_alloc::arena;
@@ -21,10 +25,15 @@ pub use pocket_psp_alloc::c_heap;
 pub use pocket_psp_audio::output as audio;
 pub use pocket_psp_audio::streams as audio_mod;
 pub mod dbg;
+pub mod fs_ops;
+pub mod pack_ops;
 pub mod scene;
 pub mod service_bindings;
 pub use scene as ge;
 pub mod host;
+pub use pocket_psp_io::link;
+pub mod media;
+pub mod media_wire;
 mod instance;
 /// The exported profile this EBOOT was built for (`psp` or `psp-runtime`);
 /// build.rs copies it into OUT_DIR from `POCKETJS_PROFILE_RS`.

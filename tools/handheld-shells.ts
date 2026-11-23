@@ -1,11 +1,11 @@
 // tools/handheld-shells.ts: the handhelds' shells a page shows a device's
 // screens in, in two sets: the Pocket3D player's
-// (devices/web/pocket-web-wgpu/web/shells) and the MicroTS playground's
+// (engine/pocket3d/crates/pocket-web-wgpu/web/shells) and the MicroTS playground's
 // (site/microts/shells; the playground also shows the PSP and the 3DS of the
 // Pocket3D set).
 //
 //   bun tools/handheld-shells.ts pocket3d [psp|vita|3ds|ipod|android …] [--samples 128] [--no-render]
-//   bun tools/handheld-shells.ts microts [gba|iphone-4s|ipod-touch-5|bb-classic|ipod-nano …] [--samples 128] [--no-render]
+//   bun tools/handheld-shells.ts microts [gba|ipod-touch-5|ipod-nano …] [--samples 128] [--no-render]
 //
 // For each device, Blender renders its front in two passes
 // (tools/handheld-models/shells.py → dist/handheld-shells/<id>/): the case with
@@ -29,8 +29,8 @@ import { fileURLToPath } from "node:url";
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const RENDERS = join(ROOT, "dist/handheld-shells");
 export const SHELL_SETS = {
-  pocket3d: { out: "devices/web/pocket-web-wgpu/web/shells", ids: ["psp", "vita", "3ds", "ipod", "android"] },
-  microts: { out: "site/microts/shells", ids: ["gba", "iphone-4s", "ipod-touch-5", "bb-classic", "ipod-nano"] },
+  pocket3d: { out: "engine/pocket3d/crates/pocket-web-wgpu/web/shells", ids: ["psp", "vita", "3ds", "ipod", "android"] },
+  microts: { out: "site/microts/shells", ids: ["gba", "ipod-touch-5", "ipod-nano"] },
 } as const;
 export type ShellSet = keyof typeof SHELL_SETS;
 

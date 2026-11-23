@@ -1,5 +1,10 @@
 [package]
 name = "pocket-package"
+readme = "README.md"
+homepage = "https://pocketjs.pocket.nexus"
+documentation = "https://docs.rs/pocket-package"
+keywords = ["pocketjs", "package", "assets"]
+categories = ["no-std", "parser-implementations"]
 edition = "2021"
 description = "PocketJS package admission, asset pack readers, and package identity hashing"
 
@@ -11,3 +16,6 @@ license.workspace = true
 [dependencies]
 pocket-spec = { workspace = true, default-features = true }
 pocket-drivers = { workspace = true, default-features = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

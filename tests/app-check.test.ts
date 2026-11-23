@@ -67,17 +67,17 @@ describe("per-app TypeScript checks", () => {
     expect(result.artifacts.tsconfig).toContain(`"extends": ${JSON.stringify(ROOT_TSCONFIG)}`);
   });
 
-  test("runtime config modules stay outside the guest graph and do not provide Node globals", () => {
+  test("host config modules stay outside the guest graph and do not provide Node globals", () => {
     const directory = mkdtempSync(resolve(tmpdir(), "pocketjs-guest-config-"));
     try {
       const platform = new URL("../framework/src/platform.ts", import.meta.url).pathname;
       const modality = new URL("../framework/src/modality.ts", import.meta.url).pathname;
-      writeFileSync(resolve(directory, "pocket.runtime-config.ts"), 'import {createHash} from "node:crypto"; export default {profile:createHash("sha256")};');
+      writeFileSync(resolve(directory, "pocket.host.config.ts"), 'import {createHash} from "node:crypto"; export default {host:createHash("sha256")};');
       const main = resolve(directory, "main.ts");
       writeFileSync(main, `import {platform} from ${JSON.stringify(platform)};import {modality} from ${JSON.stringify(modality)};export const target=platform.target;void modality;`);
       const result = checkAppTypes({ entry: main });
       expect(errors(result)).toBe("");
-      expect(result.checkedFiles.some(file => file.endsWith("pocket.runtime-config.ts") || file.endsWith("framework/src/profile.ts"))).toBe(false);
+      expect(result.checkedFiles.some(file => file.endsWith("pocket.host.config.ts") || file.endsWith("framework/src/profile.ts"))).toBe(false);
       writeFileSync(main, "export const host=process.env.HOME;");
       expect(errors(checkAppTypes({ entry: main }))).toContain("Cannot find name 'process'");
     } finally { rmSync(directory, { recursive: true, force: true }); }
@@ -88,6 +88,46 @@ describe("per-app TypeScript checks", () => {
 
     expect(errors(result)).toBe("");
     expect(result.ok).toBe(true);
+  });
+
+  test("uses the selected SDK for external apps while retaining their own aliases", () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "pocketjs-selected-sdk-"));
+    try {
+      const main = resolve(directory, "main.ts");
+      const tsconfigPath = resolve(directory, "tsconfig.json");
+      writeFileSync(main, [
+        'import { io } from "@pocketjs/framework/io";',
+        'import { sleep } from "@pocketjs/framework/worker";',
+        'import { address } from "@board/settings";',
+        'const device = io.i2c("internal").open({ address });',
+        'async function main(): Promise<void> { await sleep(1_000); void device; }',
+        'main();',
+      ].join("\n"));
+      writeFileSync(resolve(directory, "settings.ts"), "export const address = 0x32;\n");
+      writeFileSync(tsconfigPath, JSON.stringify({ compilerOptions: {
+        paths: {
+          "@pocketjs/framework/*": ["./old-sdk/*.ts"],
+          "@board/*": ["./*.ts"],
+        },
+      } }));
+      expect(errors(checkAppTypes({ entry: main, tsconfigPath }))).toContain("Cannot find module '@pocketjs/framework/io'");
+      const result = checkAppTypes({
+        entry: main,
+        domain: "worker",
+        tsconfigPath,
+        frameworkRoot: new URL("..", import.meta.url).pathname,
+        keepTemporaryFiles: true,
+      });
+      expect(errors(result)).toBe("");
+      expect(result.ok).toBe(true);
+      expect(result.checkedFiles.some(file => file.endsWith("/settings.ts"))).toBe(true);
+      expect(errors(checkAppTypes({
+        entry: main,
+        tsconfigPath: resolve(result.artifacts.directory!, "tsconfig.json"),
+      }))).toBe("");
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   test("keeps Solid control-flow children contextually typed without lib.dom", () => {

@@ -2,8 +2,10 @@ name: media.local and the iPoDS 3DS host
 # The ipo-ds branch's own additions: the media.local contract, its sim host,
 # the 3DS host's C units compiled for the build machine under ASan and UBSan,
 # the 3DS build arguments, and the sim bundle the iPoDS tests boot. Runs on
-# every pull request so an upstream sync is checked against them.
+# every pull request so an upstream sync is checked against them, and on
+# demand from the Actions tab.
 on:
+  workflow_dispatch: {}
   pull_request:
   push:
     branches: [ipo-ds]

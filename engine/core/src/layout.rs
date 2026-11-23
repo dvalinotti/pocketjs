@@ -8,7 +8,7 @@
 //! Text nodes: a text ELEMENT becomes a taffy measure leaf over its
 //! concatenated inline run; text children of a text element are absorbed into
 //! that run (never flex items). Text nodes whose run is EMPTY (Solid `<Show>`
-//! markers) are excluded from the taffy tree entirely [R].
+//! markers) are excluded from the taffy tree entirely `[R]`.
 //!
 //! Three things narrow what one relayout touches:
 //!
@@ -164,7 +164,7 @@ pub struct LayoutEngine {
     pub built: bool,
     /// Root taffy node of the built tree.
     pub root: Option<taffy::NodeId>,
-    /// Layout viewport in px. Defaults to the PSP screen; desktop hosts set it
+    /// Layout viewport in px. Defaults to the PSP screen; resizable hosts set it
     /// through `Ui::set_viewport` (the draw clip stage uses the same bounds).
     pub viewport: (f32, f32),
     entries: Vec<Option<LayoutEntry>>,

@@ -27,10 +27,12 @@ export function psplinkPrxStale(root: string, name: string, prx: string): boolea
     join(root, "framework/src"),
     join(root, "framework/compiler"),
     join(root, "contracts/spec"),
-    ...["core", "spec", "drivers", "runtime", "runtime-cabi", "profile-build", "raster", "present", "package", "modules/media", "render/draw-ops", "render/glyph-pages"].flatMap(crate => [
+    ...["core", "spec", "drivers", "runtime", "profile-build", "raster", "package", "modules/media", "render"].flatMap(crate => [
       join(root, "engine", crate, "src"),
       join(root, "engine", crate, "Cargo.toml"),
     ]),
+    join(root, "programs/sdk/archive/src"),
+    join(root, "programs/sdk/archive/Cargo.toml"),
     join(root, "engine/guest-quickjs/src"),
     join(root, "engine/guest-quickjs/include"),
     join(root, "contracts/generated"),
@@ -50,7 +52,7 @@ export function psplinkPrxStale(root: string, name: string, prx: string): boolea
     join(root, "programs/psp/build.rs"),
     join(root, "programs/psp/Cargo.toml"),
     join(root, "Cargo.lock"),
-    join(root, "profiles/psp.ts"),
+    join(root, "hosts/psp/pocket.host.json"),
   ];
   return inputs.some(input => {
     const newest = existsSync(input) && statSync(input).isFile()

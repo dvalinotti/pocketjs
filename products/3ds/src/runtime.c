@@ -12,6 +12,7 @@
 #include "pocket_profile.h"
 #include "error_text.h"
 #include "fs.h"
+#include "push_timing.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -47,7 +48,7 @@ bool runtime_select_slot(const char *slot) {
   snprintf(packages_dir, sizeof packages_dir, POCKET_RUNTIME_APPS "/%s/packages", slot_name);
   snprintf(state_dir, sizeof state_dir, POCKET_RUNTIME_APPS "/%s/state", slot_name);
   snprintf(pending_path, sizeof pending_path, POCKET_RUNTIME_APPS "/%s/pending.pocket", slot_name);
-  /* The dev wire's staging file stays in the FIRST selected slot (the
+  /* A pushed package's staging file stays in the FIRST selected slot (the
    * embedded guest's) for the process lifetime: a transfer that is in flight
    * when the launcher switches apps lands where it started, and main.c routes
    * the finished package to the slot its app id names. */
@@ -64,22 +65,22 @@ const char *runtime_upload_path(void) { return upload_path; }
 
 static const char *package_error(int32_t code) {
   switch (code) {
-    case 1: return "truncated package";
-    case 2: return "bad package magic";
-    case 3: return "unsupported package version";
-    case 4: return "package integrity hash mismatch";
-    case 5: return "invalid package UTF-8";
-    case 6: return "package has no " POCKETJS_TARGET_ID " variant";
-    case 7: return "package host ABI mismatch";
-    case 8: return "package identity section missing";
-    case 9: return "package plan section missing";
-    case 10: return "package JavaScript section missing";
-    case 11: return "package JavaScript is not NUL-terminated";
-    case 13: return "package plan is not readable JSON";
-    case 14: return "package plan has no usable viewport";
-    case 15: return "package plan has an unusable auxiliary surface";
-    case 16: return "package profile hash mismatch";
-    case 17: return "invalid package layout";
+    case POCKET_PACKAGE_OPEN_TRUNCATED: return "truncated package";
+    case POCKET_PACKAGE_OPEN_BAD_MAGIC: return "bad package magic";
+    case POCKET_PACKAGE_OPEN_BAD_VERSION: return "unsupported package version";
+    case POCKET_PACKAGE_OPEN_HASH_MISMATCH: return "package integrity hash mismatch";
+    case POCKET_PACKAGE_OPEN_BAD_UTF8: return "invalid package UTF-8";
+    case POCKET_PACKAGE_OPEN_NO_VARIANT: return "package has no " POCKETJS_TARGET_ID " variant";
+    case POCKET_PACKAGE_OPEN_BINDING_GENERATION: return "package host ABI mismatch";
+    case POCKET_PACKAGE_OPEN_NO_IDENTITY: return "package identity section missing";
+    case POCKET_PACKAGE_OPEN_PLAN: return "package plan section missing";
+    case POCKET_PACKAGE_OPEN_NO_JAVASCRIPT: return "package JavaScript section missing";
+    case POCKET_PACKAGE_OPEN_JAVASCRIPT_NOT_TERMINATED: return "package JavaScript is not NUL-terminated";
+    case POCKET_PACKAGE_OPEN_PLAN_JSON: return "package plan is not readable JSON";
+    case POCKET_PACKAGE_OPEN_PLAN_VIEWPORT: return "package plan has no usable viewport";
+    case POCKET_PACKAGE_OPEN_PLAN_AUXILIARY: return "package plan has an unusable auxiliary surface";
+    case POCKET_PACKAGE_OPEN_BAD_LAYOUT: return "invalid package layout";
+    case POCKET_PACKAGE_OPEN_WORKER_SECTION: return "worker capability and package section disagree";
     default: return "invalid package arguments";
   }
 }
@@ -152,6 +153,7 @@ bool runtime_storage_init(PocketRuntimeState *state, char *error, size_t error_l
     pocket_set_error(error, error_length, "runtime slot not selected");
     return false;
   }
+  uint64_t step = push_timing_now();
   if (!ensure_directory("sdmc:/pocketjs", error, error_length) ||
       !ensure_directory(POCKET_RUNTIME_ROOT, error, error_length) ||
       !ensure_directory(POCKET_RUNTIME_APPS, error, error_length) ||
@@ -161,10 +163,13 @@ bool runtime_storage_init(PocketRuntimeState *state, char *error, size_t error_l
     return false;
   }
 
+  push_timing_step("storage-mkdirs", step, "%s", POCKET_RUNTIME_APP_ROOT);
+  step = push_timing_now();
   if (!scan_state(STATE_DIR, state)) {
     pocket_set_error(error, error_length, "opendir %s failed (%d)", STATE_DIR, errno);
     return false;
   }
+  push_timing_step("storage-scan-state", step, "generation %lu", (unsigned long)state->generation);
   return true;
 }
 
@@ -203,9 +208,12 @@ PocketRuntimePackage *runtime_package_load(
   char *error,
   size_t error_length
 ) {
+  uint64_t step = push_timing_now();
   FILE *file = fopen(path, "rb");
+  int open_errno = errno;
+  push_timing_step("package-fopen", step, "%s", path);
   if (file == NULL) {
-    pocket_set_error(error, error_length, "open %s failed (%d)", path, errno);
+    pocket_set_error(error, error_length, "open %s failed (%d)", path, open_errno);
     return NULL;
   }
   if (fseek(file, 0, SEEK_END) != 0) {
@@ -235,23 +243,27 @@ PocketRuntimePackage *runtime_package_load(
     free(package);
     return NULL;
   }
+  step = push_timing_now();
   size_t read = fread(package->bytes, 1, package->length, file);
   int close_result = fclose(file);
+  push_timing_step("package-fread", step, "%lu bytes of %s", (unsigned long)read, path);
   if (read != package->length || close_result != 0) {
     pocket_set_error(error, error_length, "read %s was incomplete", path);
     runtime_package_free(package);
     return NULL;
   }
 
+  step = push_timing_now();
   int32_t result = pocket_package_open(
     package->bytes,
     package->length,
-    (const uint8_t *)POCKETJS_TARGET_ID,
-    sizeof POCKETJS_TARGET_ID - 1,
+    &pocket_3ds_profile,
     POCKETJS_HOST_ABI,
     pocket_3ds_profile_hash,
     &package->guest
   );
+  push_timing_step("package-open-verify", step, "%lu bytes, js %lu, pak %lu, result %ld", (unsigned long)package->length,
+                   (unsigned long)package->guest.javascript_length, (unsigned long)package->guest.pak_length, (long)result);
   if (result != 0 || package->guest.package_hash == 0) {
     pocket_set_error(
       error,
@@ -347,7 +359,11 @@ RuntimePendingResult runtime_prepare_file(
 
   char destination[192];
   blob_path(pending->guest.package_hash, destination, sizeof destination);
-  if (stat(destination, &info) == 0) {
+  uint64_t step = push_timing_now();
+  bool exists = stat(destination, &info) == 0;
+  int stat_errno = errno;
+  push_timing_step("blob-stat", step, "%s exists=%d", destination, exists);
+  if (exists) {
     char duplicate_error[192] = {0};
     PocketRuntimePackage *existing = runtime_package_load_hash(
       pending->guest.package_hash,
@@ -360,19 +376,29 @@ RuntimePendingResult runtime_prepare_file(
       return RUNTIME_PENDING_ERROR;
     }
     runtime_package_free(existing);
-    if (remove(path) != 0) {
-      pocket_set_error(error, error_length, "remove duplicate staged package failed (%d)", errno);
+    step = push_timing_now();
+    int removed = remove(path);
+    int remove_errno = errno;
+    push_timing_step("staging-remove", step, "%s", path);
+    if (removed != 0) {
+      pocket_set_error(error, error_length, "remove duplicate staged package failed (%d)", remove_errno);
       runtime_package_free(pending);
       return RUNTIME_PENDING_ERROR;
     }
-  } else if (errno != ENOENT) {
-    pocket_set_error(error, error_length, "stat %s failed (%d)", destination, errno);
+  } else if (stat_errno != ENOENT) {
+    pocket_set_error(error, error_length, "stat %s failed (%d)", destination, stat_errno);
     runtime_package_free(pending);
     return RUNTIME_PENDING_ERROR;
-  } else if (rename(path, destination) != 0) {
-    pocket_set_error(error, error_length, "commit staged package failed (%d)", errno);
-    runtime_package_free(pending);
-    return RUNTIME_PENDING_ERROR;
+  } else {
+    step = push_timing_now();
+    int renamed = rename(path, destination);
+    int rename_errno = errno;
+    push_timing_step("staging-rename-to-blob", step, "%s -> %s, %lu bytes", path, destination, (unsigned long)pending->length);
+    if (renamed != 0) {
+      pocket_set_error(error, error_length, "commit staged package failed (%d)", rename_errno);
+      runtime_package_free(pending);
+      return RUNTIME_PENDING_ERROR;
+    }
   }
   snprintf(pending->origin, sizeof pending->origin, "%s", destination);
   *out = pending;
@@ -403,6 +429,7 @@ bool runtime_commit(
     (unsigned long long)active_hash,
     (unsigned long long)last_good_hash
   );
+  uint64_t step = push_timing_now();
   remove(temporary_path);
   FILE *file = fopen(temporary_path, "wb");
   if (file == NULL) {
@@ -417,6 +444,7 @@ bool runtime_commit(
     remove(temporary_path);
     return false;
   }
+  push_timing_step("state-commit", step, "%s", final_path);
   state->generation = generation;
   state->active_hash = active_hash;
   state->last_good_hash = last_good_hash;

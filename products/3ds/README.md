@@ -1,35 +1,42 @@
 # Nintendo 3DS product
 
-The 3DS product composes **one archive containing `pocket-runtime-cabi` and
-private recovery inspection** with the
-generated QuickJS guest, a package source, input source, PICA renderer and two
-display outputs. The runtime owns the retained tree, layout, animation, physics,
+The 3DS product composes **one archive containing `pocket-archive`, private
+recovery inspection and the native program without built-in outputs** with the
+handle-based QuickJS facade (`programs/native/quickjs`), the generated QuickJS
+guest, a package source, input source, PICA renderer and two display outputs. The runtime owns the retained tree, layout, animation, physics,
 package admission and frame coordination. The C device driver consumes the public
 DrawList and resource contracts and issues **PICA200 draws through citro3d**.
 
 The app owns the **400x240 top screen** and **320x240 auxiliary bottom screen** at
-raster density 1, under the private `3ds-dev` profile in `tools/3ds-profile.ts`.
-The resistive panel reports contacts through `input.touch.auxiliary`. The profile
-remains outside the production registry pending the complete hardware and golden
-suite; the architecture migration has compiler, linker and host-test coverage.
+raster density 1, under the `3ds-dev` host contract
+(`hosts/3ds-dev/pocket.host.json`); `tools/3ds-profile.ts` resolves its build
+plans. The resistive panel reports contacts through `input.touch.auxiliary`.
+The host contract remains outside the production registry pending the complete
+hardware and golden suite; the architecture migration has compiler, linker and
+host-test coverage.
 
 ```
-core/                 one runtime staticlib plus package recovery inspection ABI
+core/                 one runtime staticlib: package recovery inspection ABI and
+                      pocket-native-program with host-backend and host-hooks
 include/pocket_core.h package inspection and native resource convenience calls
-include/pocket_profile.h generated profile facts, hash and operation identifiers
-src/instance.c        runtime, package/input/provider registration
+include/pocket_profile.h generated host contract facts, hash and operation identifiers
+src/instance.c        package source; input, provider and output registration
 src/main.c            process boot, reusable guest lifecycle, frame boundary
 src/runtime.c         immutable package storage, active/rollback state
-src/devserver.c       discovery, paired TCP pump, uploads, screenshots, receipts
-src/dev_protocol.c    byte-order-safe development wire encoding and admission
+src/link2_host.c      the program's side of Pocket Link 2: identity, runtime operations, screenshots, DevTools
+src/devstats.c        frame timing and counters for a DevTools panel
 src/devmenu.c         host-owned bottom-screen development DrawList
-src/native.c          .3dsx staging, verification and swap for the dev connection
+src/native.c          .3dsx staging, verification and swap for runtime.native.install
 src/hbldr.c           Luma3DS hb:ldr requests that start a .3dsx on exit
 src/error_text.h      fixed-buffer error formatter
 src/gfx.c             PICA driver registration and product texture/scene adapters
-src/qjs.c             generated guest attachment and product namespaces
+src/qjs.c             facade host guest: realm, product namespaces, bytecode,
+                      worker start and stop around the program
 src/transition.c      app-switch overlay: scrim and activity indicator lists
 src/bytecode.c        a slot's bundle bytecode on the SD card
+src/bundle_compile.c  a bundle compiled to bytecode in a QuickJS runtime of its own, off the main thread
+src/slot_folders.c    a new slot's folders, created off the main thread
+src/push_timing.c     the time of each runtime.push, one log line
 src/services_host.c   host_services.h: clocks, owner name, sockets, SD slots
 src/wifi.c            globalThis.wifi over AC and nwm::EXT
 src/camera.c          camera texture, QR decode and stills
@@ -57,8 +64,31 @@ Two toolchains, one repository:
   `arm-none-eabi-gcc`, libctru, citro3d, `picasso`, `smdhtool` and `3dsxtool`.
 
 `tools/3ds.ts` drives both and hands this Makefile container paths in
-environment variables (the list is at the top of the Makefile).
-`src/instance.c` registers the PICA instance and both outputs.
+environment variables (the list is at the top of the Makefile). The Makefile
+also compiles `programs/native/quickjs/pocket_qjs_program.c` with
+`POCKET_QJS_HOST_PROFILE`: the facade takes the 3DS profile from `src/qjs.c`.
+
+## Composition
+
+**`src/qjs.c` boots each guest through the QuickJS facade with a host
+composition.** It creates the QuickJS realm and attaches the generated guest
+in canonical mode, then passes `pocket_qjs_program_create_host` the 3DS profile
+facts and hash, its `pocket_guest_v1` table and two hooks.
+`pocket_qjs_program_boot_source` creates the program from the package source
+in `src/instance.c`, with the plan's viewport, a 64 MiB guest heap and frame
+buffers for both screens. The runtime reads and admits the package at boot and
+loads its assets natively.
+
+The compose hook runs after the facade attaches the guest and before admission:
+`instance_attach` registers the input source, the product op provider, the
+PICA renderer and both displays on the program's runtime, then the worker
+starts for a package with a worker bundle. The program registers no output of
+its own, so the runtime's boot checks require the primary display and the
+profile's auxiliary display. The release hook detaches the worker bridge,
+stops the worker and forgets the runtime before the facade destroys the
+program, after a failed compose or boot as well as at `qjs_shutdown`. Frames
+call `pocket_runtime_present` and `pocket_runtime_tick` on the runtime that
+`pocket_qjs_program_runtime` returns.
 
 ```sh
 bun tools/3ds.ts 3ds-demo              # dist/3ds/<output>.3dsx
@@ -68,15 +98,16 @@ bun tools/3ds.ts 3ds-demo --pocket-only # rebuild only dist/3ds/<output>.pocket
 ```
 
 Every build writes a target-thinned `.pocket` next to the native artifact.
-**The `.pocket` contains the admitted manifest, resolved plan, compiled JS and
-target-flavoured PAK.** The native runtime embeds the same file as its immutable
+**The `.pocket` contains the admitted app contract, resolved plan, compiled JS
+and target-flavoured PAK.** The native runtime embeds the same file as its immutable
 recovery guest; it no longer embeds independent `app.js` and `app.pak` files.
 
 ## One runtime for every game
 
 **Nothing in the program depends on the game.** At boot `main.c` reads
 `romfs:/app.pocket` before it creates a render target: `pocket_package_open`
-admits the package and returns the plan's `viewport` and
+admits the package against the program's exported facts
+(`pocket_3ds_profile`) and returns the plan's `viewport` and
 `surfaces.auxiliary` (logical size and raster density), its `io.offload` and
 `media.playback` features, and the first 16 hex digits of SHA-256 over the
 variant identity's app id. The surfaces must be the 400x240 top screen and the
@@ -88,17 +119,19 @@ writes `this .3dsx carries no game: romfs:/app.pocket is missing` to the bottom
 screen and to `sdmc:/pocketjs-error.txt`, and waits for HOME.
 
 **The generic runtime is a separate program.** `programs/3ds` reads a file
-package and registers the generated guest, input source and two PICA displays.
-It has no product services, development server, camera, launcher or recovery
-state. Its `3ds-runtime` profile accepts only the capabilities implemented by
-that program. The generic program links the default Runtime archive; this
-product links `core/` for its recovery inspection interface.
+package and registers the generated guest, input source and two PICA displays
+through the same QuickJS facade. It has no product services, development
+server, camera, launcher or recovery state. Its `3ds-runtime` host
+contract accepts only the capabilities implemented by that program. The
+generic program links the native program built without outputs or hooks; this
+product links `core/` for its recovery inspection interface and the same native
+program.
 
 Use `pocket build --target 3ds --generic` for that runtime and
 `pocket pack --runtime <build-directory> --pocket <application.pocket>` to
 replace its RomFS. See [the minimal program](../../programs/3ds/README.md).
 `pocket build --target 3ds --pocket <application.pocket>` selects this product
-and its `3ds-dev` profile. Existing `tools/3ds.ts` options delegate to
+and its `3ds-dev` host contract. Existing `tools/3ds.ts` options delegate to
 `products/3ds/build.ts`, including capture, CIA and package-only builds.
 
 ## Updating the guest from SD
@@ -129,11 +162,11 @@ running or accepted guest.
 
 **Each embedded application id has its own package, generation and recovery
 state.** The slot is the first 16 hexadecimal digits of SHA-256 over the
-manifest `id`, which the runtime computes at boot from the identity of
+app contract `id`, which the runtime computes at boot from the identity of
 `romfs:/app.pocket`; the fixed length keeps native paths bounded. Contacts, Pocket
 Shell and Pocket Term can therefore live as separate `.3dsx` files on one SD
 card without one app's last-good package booting under another app's icon.
-The pairing key remains device-wide at `sdmc:/pocketjs/runtime/dev.key`, so the
+The link's pairing is device-wide under `sdmc:/pocketjs/link/`, so the
 console is paired once. Pre-slot state directly under
 `sdmc:/pocketjs/runtime/{packages,state}` is left untouched and is not loaded
 by a slotted runtime.
@@ -180,105 +213,118 @@ complete chord is removed from guest input. Select the next Pocket app in HBL
 to switch while preserving each app's independent accepted and last-good
 packages.
 
-## In-process development connection
+## Development over the link
 
 `L+R+SELECT` opens the **3DS host's native development menu** on the bottom
-screen. It shows the current IP and port, pairing or connection state, active
-generation, running package hash, update and screenshot counts, and transport
-errors. `X` requests a dual-screen screenshot from a connected client; `B` or
-`START` closes the menu.
+screen. It shows the link's state (linked, searching, not paired), the
+console's address and device id, the active generation, the running package
+hash, and counts of pushes, screenshots and links. `X` sends a dual-screen
+screenshot to the linked computer; `B` or `START` closes the menu.
 
 **While visible, the menu replaces the guest's bottom-screen DrawList with a
 host-owned DrawList and consumes all guest input.** It uses the same verified
-PICA200 backend as the guest and reads a fixed native Runtime snapshot; it is
-not part of `globalThis.ui`, the guest input contract, or a published PocketJS
-capability. The input latch stays active until the keys used to close the menu
-have been released.
+PICA200 backend as the guest and reads a fixed snapshot the link fills
+(`devmenu.h` `DevmenuSnapshot`); it is not part of `globalThis.ui`, the guest
+input contract, or a published PocketJS capability. The input latch stays
+active until the keys used to close the menu have been released.
 
-Pocket Runtime listens on TCP and UDP port 8131 when this file exists:
-
-```text
-sdmc:/pocketjs/runtime/dev.key
-```
-
-Pair once while ftpd is running, then restart Pocket Runtime:
+**Every development step travels on Pocket Link 2** (`docs/POCKET-LINK.md`,
+"Pocket Link" below): the program has no listener of its own, and the
+connection of earlier builds (TCP and UDP port 8131, `dev.key`) is gone. The
+console dials the paired computer. Pair once while ftpd runs on the console:
 
 ```sh
-bun run 3ds:dev pair --host <device-ip> --ftp-port 5000
+bun run 3ds:dev setup --host <device-ip> --ftp-port 5000
 ```
 
-**The pairing command generates a random 32-byte key, stores the local copy
-under `.pocket/3ds/devices/`, uploads the device copy, and verifies the FTP
-readback byte for byte.** The Runtime does not open a listener without the key,
-and a client must prove the complete key before any command or package byte is
-accepted.
+**The setup writes this computer's pairing onto the card**:
+`sdmc:/pocketjs/link/device.txt` (the console's id, kept when the card holds
+one) and `sdmc:/pocketjs/link/companions/<hub id>.txt` (the key, this
+computer's name, address and port), each read back through ftpd
+(`docs/POCKET-LINK.md` §3.2). `setup --card <dir>` writes the same files onto a
+mounted card. **The computer keeps its identity and one record per console
+under `~/.pocketjs/link/`** (`$POCKETJS_LINK_HOME` names another folder;
+`tools/pocket-link/v2/store.ts`), folder mode 0700 and files 0600. No command
+prints a key.
 
-**The key authenticates a client but does not encrypt the TCP stream.** Use the
-listener on a trusted LAN, and pass `--rotate` to `pair` after a key is exposed.
-**The key authorizes native code: a paired client writes and starts any
-`.3dsx` under `sdmc:/3ds/`.** Frames after the hello carry no MAC, so a host
-that can inject into the TCP session can do the same.
+**The key authenticates the handshake and does not encrypt the stream**
+(`docs/POCKET-LINK.md` §3.9). Use the link on a trusted LAN. **A paired
+computer writes and starts any `.3dsx` under `sdmc:/3ds/`.**
 
-After pairing, ftpd is not part of the development loop:
+After the setup, ftpd is not part of the development loop:
 
 ```sh
-bun run 3ds:dev discover
+bun run 3ds:dev devices
 bun run 3ds:dev push    --app 3ds-demo
 bun run 3ds:dev install --app 3ds-demo
 bun run 3ds:dev probe
 bun run 3ds:dev dev     --app 3ds-demo
 ```
 
-**`discover`, `push`, `install`, `launch`, `probe`, and `dev` do not require the 3DS IP**
-(`install --ftp` does). The
-Runtime answers one fixed-size UDP discovery request with its target, ABI,
-TCP port, generation, active hash, and a stable ID derived from the pairing
-key. The reply never contains the key. The desktop tool matches that ID to a
-local key and then authenticates the TCP connection with the complete 32-byte
-key. This keeps the pairing valid when DHCP changes the console's address.
-Pass `--host <device-ip>` when broadcast discovery is unavailable; the native
-menu supplies that address.
+**No command needs the console's address.** The computer sends a beacon once
+a second to each interface's broadcast address and to the last address of
+every paired console; the console follows the beacon of a computer it holds a
+key for and dials it, so the pairing stays valid when DHCP changes either
+address. Pass `--host <device-ip>` to add that address as a beacon target on
+a network without broadcast; the native menu shows it. **A console links to
+one computer at a time**: a command that sees no console within its wait
+(`--wait`, 20 s) says what to check, and a console whose program was built
+before Pocket Link 2 never links.
 
-**`dev` waits when no paired Runtime is present, replaces a disconnected TCP
-client, and rediscovers the same paired device ID until it reconnects.** Panel
-commands and keyboard shortcuts are routed only to the current authenticated
-client. A client that receives no PONG for eight seconds is replaced even when
-the operating system has not reported the half-open TCP socket as closed. The
-Runtime reserves the latest PONG until the bounded output queue can send it;
-bulk screenshot traffic cannot discard the heartbeat response.
+**A command starts the computer's end, waits for the console to dial it, acts
+and leaves; `serve` and `dev` stay linked.** While one of the two runs for a
+store, every other command goes through it (`<store>/serve.sock`), since a
+second end would wait for a console that is already linked. `bun run link2`
+is the same command line without the 3DS build steps
+(`tools/pocket-link/v2/cli.ts`).
 
-`push` builds and transfers the target-thinned `.pocket`, then waits for the
-device's **accepted-after-retired-frame** receipt. `probe` requests runtime
-status, native counters, the component tree, a live REPL evaluation, a console
-message, and a combined top/bottom PNG. `dev` keeps the DevTools panel attached;
-`r` rebuilds and pushes, `i` installs the `.3dsx` and restarts into it, `s`
-captures both screens, and `o` opens the panel.
+`push` builds and transfers the target-thinned `.pocket` (`--package <file>`
+sends one as it is), then prints the device's phases up to
+**accepted-after-retired-frame**. `probe` prints `runtime.status` and writes a
+combined top/bottom PNG. `dev` is `serve --panel` with the build steps on
+keys: it keeps the Pocket DevTools panel attached, `r` rebuilds and pushes,
+`i` installs the `.3dsx` and restarts into it, `s` captures both screens, `o`
+opens the panel and `q` quits.
+
+**DevTools lines travel on one stream of the link** (`docs/POCKET-LINK.md`
+§6.3): the component tree, the REPL's eval, console messages and the panel's
+commands. **The program lists the `devtools` group while the running guest
+has the DevTools shim**, which the shim tells it as it installs
+(`ui.__dbgActive`); a guest built without the shim drops the group at its
+first frame, and an eval toward it ends at the 5 s the tool waits for the
+stream. A guest's console
+lines also leave as `log` events whether a panel listens or not
+(`runtime.logs`). The panel's screenshot button and the menu's `X` send
+`runtime.screenshot` unsolicited, with a stream of its own (§6.2).
 
 **`devStats.timingUs` records the mean and maximum microseconds over a 60-frame
-window.** `pre` measures sockets, link and input before the tick; the retained
-`js` slot now measures the complete canonical tick, including guest, layout,
-rendering and terminal presentation. The legacy `tick`, `layout`, `draw` and `gpu` slots are zero until the runtime exposes phase counters.
-`wait` measures the host VBlank boundary, and `frame` measures the interval.
-`work` holds each frame's js + tick + draw, so its maximum is one real frame's CPU time. `slowFrames` counts intervals above 25 ms. `gpuLate` counts extra VBlanks at the
-host boundary; rendering now waits inside the canonical tick, so it is not a
-measure of GPU time. Recovery and reload reset the sampled interval.
+window** (`src/devstats.c`). `pre` measures sockets, link and input before the
+tick; the retained `js` slot now measures the complete canonical tick,
+including guest, layout, rendering and terminal presentation. The legacy
+`tick`, `layout`, `draw` and `gpu` slots are zero until the runtime exposes
+phase counters. `wait` measures the host VBlank boundary, and `frame` measures
+the interval. `work` holds each frame's js + tick + draw, so its maximum is one
+real frame's CPU time. `slowFrames` counts intervals above 25 ms. `gpuLate`
+counts extra VBlanks at the host boundary; rendering now waits inside the
+canonical tick, so it is not a measure of GPU time. Recovery and reload reset
+the sampled interval.
 `ui.__dbgFrames()` retains the `pre,js,layout,draw,gpu,wait,frame` wire shape in
-0.1 ms units, with the same zero placeholders.
+0.1 ms units, with the same zero placeholders. `devStats.net` holds the
+link's part: `connected`, `connects` (links since start), `uploads` (pushed
+packages) and `screenshots`.
 
-**One authenticated, ordered TCP connection carries every development
-message.** JSON frames contain only Pocket DevTools control and logs. Package
-and rotated RGB8 screenshot bytes use bounded binary frames, so bulk data never
-enters QuickJS or the application's capability surface. Uploads stream to
+**Package and screenshot bytes travel on credited streams of the link, never
+through QuickJS or the application's capability surface.** A push streams to
 `network-upload.pocket`; the existing package admission, immutable blob,
 GPU-idle cold-swap, acceptance, and rollback path remains the only route to an
 active guest.
 
 **A push replaces the guest `.pocket`, never the process that admits it.** A
-native host or ABI change needs a new `.3dsx`, which the same connection writes
-as a file for the next start (below); the embedded `.pocket` remains its final
-recovery guest. Keeping that boundary lets ordinary app, asset and
-resolved-plan changes use the in-process loop without letting a guest replace
-the process that admits and rolls it back.
+native host or ABI change needs a new `.3dsx`, which the link writes as a file
+for the next start (below); the embedded `.pocket` remains its final recovery
+guest. Keeping that boundary lets ordinary app, asset and resolved-plan
+changes use the in-process loop without letting a guest replace the process
+that admits and rolls it back.
 
 ### Installing and launching `.3dsx` files
 
@@ -288,14 +334,14 @@ bun run 3ds:dev install --file app.3dsx --no-launch  # install for the next star
 bun run 3ds:dev launch pocket3ds-demo-main.3dsx      # start a .3dsx already on the card
 ```
 
-**`install` streams a `.3dsx` to `sdmc:/3ds/<name>` over the paired
-connection, so ftpd is needed once, for pairing.** The Runtime writes
-`sdmc:/pocketjs/runtime/native-upload.3dsx`, checks the declared length (32
-bytes to 32 MiB), CRC-32 and `3DSX` magic, moves the file it replaces to
-`native-previous.3dsx`, and renames the upload into place. A name is 6..64
-bytes of `[A-Za-z0-9._-]` ending in `.3dsx`: one file directly under
-`sdmc:/3ds/`, never a path. `src/dev_protocol.c` holds the wire and name
-rules; `src/native.c` holds the file steps and compiles on the host for
+**`install` streams a `.3dsx` to `sdmc:/3ds/<name>` over the link
+(`runtime.native.install`), so ftpd is needed once, for the setup.** The
+program writes `sdmc:/pocketjs/runtime/native-upload.3dsx`, checks the
+declared length (32 bytes to 32 MiB), CRC-32 and `3DSX` magic, moves the file
+it replaces to `native-previous.3dsx`, and renames the upload into place. A
+name is 6..64 bytes of `[A-Za-z0-9._-]` ending in `.3dsx`: one file directly
+under `sdmc:/3ds/`, never a path (`link2_valid_native_name`). `src/native.c`
+holds the file steps and compiles on the host for
 `tests/3ds-native-install.test.ts`.
 
 **A transfer that replaces the running `.3dsx` moves to
@@ -305,24 +351,21 @@ from that file. Later transfers and aborts do not touch the deferred file.
 
 **To restart, `src/hbldr.c` sends Luma3DS's `hb:ldr` port SetTarget (the path
 without `sdmc:`) and SetArgv (`argv[0]` = the path), and the main loop
-ends.** These are the two requests `3ds-hbmenu` sends when it starts an entry;
-the loader starts the target as the process exits. Outside the Homebrew
-Launcher (a CIA, or Azahar loading the `.3dsx`) the request fails, the file
-stays installed, and the receipt says so. `launch` sends the same request for
-a `.3dsx` already under `sdmc:/3ds/`.
+ends** once the reply and the link's `CLOSE` `restart` have left. These are
+the two requests `3ds-hbmenu` sends when it starts an entry; the loader starts
+the target as the process exits. Outside the Homebrew Launcher (a CIA, or
+Azahar loading the `.3dsx`) the request fails, the file stays installed, and
+the reply says so. `launch` sends the same request for a `.3dsx` already under
+`sdmc:/3ds/`, or switches to an installed applet by its id.
 
-After a restart the tool rediscovers the device under its pairing ID and
-reads the running package hash. When the build's `.pocket` is known and an
-older push is running, it pushes the embedded guest. A `.3dsx` that is not a
-PocketJS dev build does not answer, which `install` reports and accepts. The
-tool stops streaming at the first `transfer-error` and times its waits from
-the end of the transfer. Receipts are `runtime.native` control records with a
-bare `name` and its `path`: `receiving`, `installed`, `staged`, `launching`,
-`rejected`, `transfer-error` and `launch-error`. **The handshake ack sets flag
-`2` on a Runtime that accepts these messages**; for an older one, `install
---ftp --host <device-ip>` copies the file through ftpd instead. In `dev`, `i`
-builds, installs, restarts and settles the guest over the reconnected
-session.
+After a restart the console links again by itself (**3 s on a New 3DS XL, 8
+to 11 s from the start of a 2.9 MB install**), and the tool waits for that
+link before it returns. A `.3dsx` that is not a PocketJS build never links,
+which `install` reports. The reply's `phase` is `installed`, `staged` (the
+running file, installed at exit) or `launching`; errors are `rejected`,
+`storage` and `launch`. A `.3dsx` built before Pocket Link 2 cannot be reached
+this way: copy a current one to `sdmc:/3ds/` with an FTP client or a card
+reader. In `dev`, `i` builds, installs and restarts.
 
 Two build-time facts are load-bearing:
 
@@ -341,7 +384,7 @@ Two build-time facts are load-bearing:
 `src/svcwire.c` implements spec ops 30..32 (`svcOpen`/`svcPoll`/`svcSend`)
 over the **SVC WIRE (PKNT) protocol** (`contracts/spec/spec.ts`,
 `engine/modules/media/src/wire.rs`) — the transport the Vita host speaks in
-`platforms/vita/net/src/lib.rs`, reduced to the devserver.c shape: non-blocking
+`platforms/vita/net/src/lib.rs`, reduced to the link client's shape: non-blocking
 sockets pumped once per frame by the main thread, no threads. The device
 listens for the companion's once-a-second UDP beacon on port 8621 (or reads a
 `sdmc:/pocketjs/host.txt` override, one line `a.b.c.d[:port]`, for
@@ -350,12 +393,12 @@ discovery), connects to the datagram's source address at its advertised TCP
 port, and exchanges `ctrl` JSON-line frames. `ping` is answered with `pong`;
 `file`/`stream` frame types are skipped by length and left unimplemented.
 
-**The dev transport, companion transport and offload worker share one SOC
+**The link, the companion transport and the offload worker share one SOC
 instance** through `src/soc.c`. An atomic state selects one initializer; a
 competing caller returns without waiting. Failed initialization retries after
 a three-second cooldown. Offload initializes and retries on its worker. The
 process releases SOC after every transport stops and the worker is joined.
-The companion channel works with or without a `dev.key`. Capture builds compile the whole
+The companion channel works with or without a pairing. Capture builds compile the whole
 transport to inert stubs (`svcOpen` reports false forever), which keeps
 golden runs deterministic — the Vita3K contract. A guest switch clears the
 guest-visible queues but keeps the TCP connection; a different app id in
@@ -423,20 +466,31 @@ uncatchable error, and the app is torn down without another frame. The scan
 moves the press edges `hidKeysDown` reports (the dev menu chords) from the
 next frame's scan to this one.
 
-**A bundle boots from bytecode after its first boot** (`src/bytecode.c`).
-`qjs_boot` compiles the source (`JS_EVAL_FLAG_COMPILE_ONLY`) and hands back
-the bytecode (`JS_WriteObject`), which main.c writes to
-`<slot>/bundle.qbc`; the next boot of the same package runs it with
-`JS_ReadObject`. The file's header carries the package hash, the first 16
+**A bundle boots from bytecode** (`src/bytecode.c`). On a package's first
+boot, main.c compiles the source (`JS_EVAL_FLAG_COMPILE_ONLY`,
+`JS_WriteObject`) in a QuickJS runtime of its own on a thread one priority
+step below the main thread (`src/bundle_compile.c`) and writes
+`<slot>/bundle.qbc`, while the main thread pumps the link every 8 ms
+(`docs/POCKET-LINK.md` §12.2): 754 ms for a 449 KB bundle on a New 3DS XL.
+That boot and every later boot of the same package run the bytecode with
+`JS_ReadObject`. When the thread cannot start, `qjs_boot` compiles in the
+guest's own runtime and hands the bytecode back, as before. The file's header carries the package hash, the first 16
 hex digits of the QuickJS build stamp (`POCKETJS_QUICKJS_STAMP`, from
 `dist/3ds/quickjs/.stamp`) and an FNV-1a checksum; a mismatch compiles again.
-On an Old 3DS, compiling Pocket Home's 477 KB bundle takes 2.3 s and reading
+On an Old 3DS, compiling Pocket Shell's 477 KB bundle takes 2.3 s and reading
 its 368 KB of bytecode takes 80 ms. The guest's runtime strips function
 source text (`JS_STRIP_SOURCE`): line tables stay, so a stack names its
 lines, and `Function.prototype.toString` returns no source. Capture builds
 compile from source on every boot.
 
-**A dev-wire push of another app installs into that app's own slot**, commits
+**A new slot's folders are created on a thread of their own**
+(`src/slot_folders.c`). On the measured New 3DS XL, `mkdir` of a new slot's
+`apps/<slot>`, `packages/` and `state/` took about 4.2 s each, 12.6 s
+together, and 14 ms once they exist; on the main loop that left the link without a pump past its
+10 s limit on every first install. A push, a boot and an install from the
+store wait for them while the link is pumped.
+
+**A push of another app installs into that app's own slot**, commits
 it as the slot's active package and launches it, so
 `bun run 3ds:dev push --app nexus` works while the launcher runs. A push of the
 running app keeps the candidate → accepted lifecycle; when that app is not the
@@ -444,42 +498,92 @@ launcher, a failing candidate returns to the launcher instead of a rollback.
 
 ## Pocket Link
 
-`engine/host-services/link.c` is the console side of
-`contracts/spec/link.ts`: **one
-authenticated TCP connection to a paired companion computer, owned by the
-host and kept across every app switch.** A guest switch drops the guest's net
-handles, undelivered events and catalog replies; an install that is streaming
-keeps writing to storage. Like `svcwire.c` it is non-blocking and pumped once
-per frame, at most 64 KiB received (and therefore written to the SD card) per
-pump.
+`engine/host-services/link2.c` is the console side of Pocket Link 2
+(`docs/POCKET-LINK.md`, `contracts/spec/link2.ts`): **one authenticated TCP
+connection to a paired Hub, owned by the host and kept across every app
+switch.** `src/link2_host.c` creates the client and supplies the program's
+side: its identity, the runtime operations, the agent's events and streams,
+DevTools lines and the running applet's channel. A guest switch drops the
+guest's HTTP streams, undelivered events and catalog waiters, closes its
+channel and sends DevTools `guest.end`; an install that is streaming keeps
+writing to storage. The client is non-blocking and pumped once per frame.
 
-- **Identity.** `sdmc:/pocketjs/link/device.txt` holds a random 16-hex device
-  id; the name is the CFG user name and the model comes from
-  `CFGU_GetSystemModel`. Each paired companion is
-  `sdmc:/pocketjs/link/companions/<id>.txt` (key, name, last address, port).
+**The link is the program's only connection to a computer for development.**
+A push goes into the staging file and through the admission in `main.c`, a
+`.3dsx` through `native.c`, a screenshot through the GPU-idle transfer in
+`main.c`, and `main.c` reports each lifecycle step to `link2_host.c`
+("Development over the link" above).
+
+- **Identity and pairing.** `sdmc:/pocketjs/link/device.txt` holds the
+  16-hex device id and `sdmc:/pocketjs/link/companions/<hub id>.txt` each
+  paired Hub's key, name, address and port. **Hub writes both at the first
+  install**, over ftpd or onto the card; the console never writes a key file
+  and has no pairing step of its own. `<hub id>.last` beside a key file
+  holds the address the console last linked at. The name is the CFG user
+  name and the model comes from `CFGU_GetSystemModel`.
 - **Discovery.** The console listens on UDP 8627 and follows a beacon only from
-  a companion it holds a key for, connecting to the datagram's source address.
-  After 2.5 s without one it tries a paired companion's last address directly.
-  Failures back off from 1 s to 8 s; a refusal holds that companion off for
+  a Hub it holds a key for, connecting to the datagram's source address.
+  After 2.5 s without one it tries a paired Hub's last address directly.
+  Failures back off from 1 s to 8 s; a refusal holds that Hub off for
   30 s. Pings every 3 s; 10 s of silence drops the link.
-- **Handshake.** The HMAC key is the raw bytes of the secret (32-byte key,
-  16-byte pairing secret). The console checks the companion's proof with a
-  constant-time compare before it sends its own.
-- **Pairing.** `link.pair(uri)` parses `pocketlink://pair?…`, replaces the
-  current connection, tries each `h` host in order in mode `pair`, unmasks and
-  stores the key on `paired` and stays linked.
-- **`globalThis.net`.** The NET module rides the link: at most 2 requests in
-  flight, request bodies up to 64 KiB sent as 16 KiB data frames, response
-  bodies accumulated in one buffer bounded by `maxBytes`, events delivered by
-  `net.poll()` once per tick. `net.start` refuses with
-  `unavailable: no companion linked` while unlinked, and adds the running
-  guest's app id as `app`.
+- **Handshake.** Each side proves the key with an HMAC over both nonces and
+  both ids; the console checks Hub's proof with a constant-time compare
+  before it sends its own. Frames after it are neither encrypted nor
+  authenticated (`docs/POCKET-LINK.md` §3.9).
+- **`globalThis.link`** keeps version 1's shape (`link2_guest.c`): `status`,
+  `forget`, `catalog`, `install`, `remove`, `poll`. **`pair` stays as a name
+  and answers false**: packages built against version 1 require it to see
+  the namespace at all.
+- **`globalThis.link.channel`**, for a package that declares
+  `link.channel`: the applet's channel to its daemon, read through
+  `@pocketjs/framework/channel` (`docs/POCKET-LINK.md` §7.3). The bindings
+  are `engine/host-services/link2_channel_qjs.c`; the program asks for the
+  channel each frame until it opens, so a guest that boots while the
+  previous guest's close still waits for room gets its channel.
+- **`ui.__dbgMemory(collect)`** reports the process heap, the linear heap
+  and the guest's own heap as QuickJS counts it (`js`, `jsObjects`); with a
+  true argument the cycle collector runs first and `jsAfterGc` /
+  `jsObjectsAfterGc` say what was garbage waiting for it.
+- **Memory.** The client allocates **180,240 bytes** once (16 KiB receive,
+  32 KiB send, the 64 KiB DevTools line ring and 64 KiB out buffer) and
+  about 24 KiB of tables; an open applet channel adds its queues and
+  windows, at most 176 KiB (`docs/POCKET-LINK.md` §9).
+- **Worker HTTP.** A package with `domains.worker` starts an independent QuickJS
+  runtime on a libctru thread. `io.http("http")` submits through a bounded
+  mailbox to the system Link owner (`link2_http.c`). Hub's `net.http` sends
+  a `net.head` event, the body on the request's stream and a reply with the
+  body length. **Each request has an 8 KiB receive window, 1 KiB blocks, and
+  separate header and terminal storage.** A block's credit returns to Hub
+  when the resource queue accepts it. Hub stops reading upstream while
+  credit is exhausted. TLS certificates, redirect policy and destination
+  checks use Hub's HTTP stack.
+  Request descriptors, including an optional UTF-8 text body, are limited to
+  1 KiB; response headers must fit 1 KiB; the response limit is 256 KiB. Two
+  HTTP resources can exist, subject to the shared resource queue's capacity.
+  Normal completion follows headers, body and `END`. Cancellation can report
+  the request outcome `UNKNOWN` before native access stops; **`END` gives the
+  final body offset** and follows the accepted body prefix. No package has a
+  UI network namespace.
+- **Worker scheduling.** The worker sleeps on an event or timer deadline.
+  The UI latches channel mirrors before each frame; publication copies into
+  host buffers. The worker has a 512 KiB heap limit, a 128 KiB JS stack limit,
+  a 5 ms turn limit and a 10 ms runtime quota per 20 ms window. Shutdown joins
+  the worker before freeing package bytes. Worker `console` output uses the
+  libctru debug-output service. For worker packages, `data.fs` is mounted only
+  in the worker realm; teardown joins that realm before unbinding its filesystem.
+  The UI realm reads worker channels through the shared bridge in
+  `engine/worker/src/quickjs_ui.c`, attached after worker bootstrap and detached
+  before the worker stops. This host does not provide a wall-clock mirror. **HTTP transport service
+  retains the system Link frame cadence**; the worker scheduler does not run
+  from the UI tick. Real-time network latency is not claimed.
 - **Installs.** `link.install(appId)` streams into
   `apps/<slot>/link-upload.pocket` of the app's own slot, admits the file
   against the head's hash and commits it as that slot's active package. The
   admission reads the package back once, which costs one long frame per install
   (about 1.6 s for a 4.3 MB package on an Old 3DS). `link.remove` refuses the
-  running app and the launcher.
+  running app, the launcher, an app with an install under way and an id the
+  launcher's table does not list. Hub's `runtime.remove` takes the same path
+  and answers each refusal with its own error (`docs/POCKET-LINK.md` §6.2).
 
 `link.status()` carries four diagnostics beyond `LinkStatus`: `connectMs`
 (TCP connect + handshake), `rttMs` (last ping), and `rxBytes` / `rxUs` /
@@ -562,8 +666,25 @@ own-screen frames, all over the Pocket Link. `main.c` filters the chord out of
 the guest's buttons, copies the touch screen into the monitor's texture at
 the start of the frame and calls `stage_render` in place of the primary
 surface's draw. `ui.captureTexts` / `ui.capturedTexts` read the texts a
-surface painted. The mechanism, the overlay and the companion side are in
-[docs/POCKET-AGENT.md](../../docs/POCKET-AGENT.md).
+surface painted. The mechanism and the overlay are in
+[docs/POCKET-AGENT.md](../../docs/POCKET-AGENT.md); the companion side runs in
+Pocket Hub.
+
+## Product extensions
+
+A guest that declares `system.extension` gets the top screen drawn by a product extension, and its interface on the touch screen. A program outside this repository supplies the extension:
+
+```
+bun tools/3ds.ts <app> --project-root=<dir> --extension=<dir> --extension-romfs=<dir>
+```
+
+| Input | What it holds |
+| --- | --- |
+| `<extension>/extension.mk` | Adds to `OBJECTS` and `LIBS`, sets `EXTENSION_HEADERS`, and writes rules for generated files such as shaders |
+| `<extension>/src/*.c` | Compiled with this product's flags and include paths. Implements every function in `include/pocket_extension.h` |
+| `--extension-romfs` | Files staged as `romfs:/extension` |
+
+**A plan with the capability and no `--extension` fails the build.** A binary without an extension refuses such a guest at boot. `main.c` calls the extension's tick before the frame, its frame begin after the previous frame retired, its render from the primary display's draw and its after-frame outside the frame. `agent_use_channel` gives it the microphone as `<feature>.audio`, and `link_feature_ready` says when the companion offers that feature. On the computer, Pocket Hub's `main()` takes `LinkExtensionFactory` values, whose sessions receive `<feature>.*` messages.
 
 ## ZL and ZR
 
@@ -637,16 +758,16 @@ frames **byte-identical to the `.3dsx` goldens** in `tests/goldens/3ds/`.
 ## Guest metadata and operations
 
 **The generated QuickJS guest publishes all numbered UI operations and metadata.**
-The runtime supplies the profile, admitted viewport, auxiliary root, raster
-density, package bytes and named asset tables. `src/qjs.c` installs the product
+The runtime supplies the host contract, admitted viewport, auxiliary root,
+raster density, package bytes and named asset tables. `src/qjs.c` installs the product
 namespaces (`link`, `net`, `wifi`, camera, media and agent) and private debugging
 hooks around that guest; it has no second UI dispatcher or package registry.
 Service, app-launch and debug-stat operations use the runtime's provider table.
 
 `ui.__viewport` comes from the admitted runtime geometry. The primary and
 auxiliary UI roots belong to the same runtime instance, including for a
-primary-only plan that uses the profile's bottom-screen defaults. No host shim
-creates another retained tree.
+primary-only plan that uses the host contract's bottom-screen defaults. No host
+shim creates another retained tree.
 
 ## 2D bodies
 
@@ -764,7 +885,7 @@ part of it, so a run gets its own config and SD card by getting its own `$HOME`.
 
 ## Not advertised
 
-`input.touch` is deliberately absent from the profile. The touchscreen belongs
+`input.touch` is absent from the host contract. The touchscreen belongs
 to the **bottom auxiliary surface**, so it is exposed only as
 `input.touch.auxiliary`; contacts are never remapped into the top screen's
 coordinate space. `audio.pcm` is not implemented in v1.
@@ -777,7 +898,7 @@ centered values. IRRST scanning stays in the host input adapter.
 ## Native QuickJS sources
 
 `tools/3ds-toolchain.ts` prepares a verified QuickJS checkout through
-`tools/native-source.ts`, shared with the BlackBerry native host. The 3DS pin
+`tools/native-source.ts`. The 3DS pin
 specifies a repository, full commit and source version. **Source preparation
 does not resolve the PSP Cargo dependency graph.** `ensureQuickJs` calls this
 preparation step before checking its compiler/source/image cache stamp.

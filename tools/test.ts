@@ -4,14 +4,16 @@
 //
 //   bun tools/test.ts                 # the full suite (what CI runs)
 //   bun tools/test.ts --stage=sim     # only stages whose name contains "sim"
+//   bun tools/test.ts --skip=AOT      # every stage but those containing "AOT"
 //   bun tools/test.ts --list          # print the stage table and exit
 //
 // Stage anatomy: `prep` commands build the artifacts a stage needs (stdout
 // captured, replayed only on failure); `script` runs a self-reporting bun
 // script as-is (tests/contract.ts prints its own ok-lines); `tests` run as
 // ONE `bun test` invocation, with `browser: true` adding
-// `--conditions=browser` (stages that eval wasm-host bundles). On failure
-// the exact repro command is printed before exiting 1.
+// `--conditions=browser` (stages that eval wasm-host bundles); `env` is
+// added to every process of the stage. On failure the exact repro command
+// is printed before exiting 1.
 
 interface Stage {
   readonly name: string;
@@ -23,6 +25,8 @@ interface Stage {
   readonly tests?: readonly string[];
   /** Run `tests` under --conditions=browser (wasm-host module resolution). */
   readonly browser?: boolean;
+  /** Environment added to every prep, script and test process of the stage. */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 const SUITE: readonly Stage[] = [
@@ -35,9 +39,7 @@ const SUITE: readonly Stage[] = [
     script: ["bun", "tests/contract.ts"],
   },
   {
-    // The C ABI allocator and PSM draw tests need the nightly toolchain
-    // selected by tools/build/toolchains/rust.ts. They run under
-    // .github/workflows/native-c-harness.yml.
+    // Native program and guest composition tests share this unit-test stage.
     name: "unit",
     // wasm-auxiliary.test.ts, wasm-premultiplied.test.ts, pocket3d-web.test.ts and runtime-glyphs.test.ts load platforms/web/pocketjs.wasm.
     prep: [["bun", "tools/wasm.ts"]],
@@ -57,6 +59,7 @@ const SUITE: readonly Stage[] = [
       "tests/driver-kit.test.ts",
       "tests/guest-web-bindings.test.ts",
       "tests/embedded-package.test.ts",
+      "tests/quickjs-bytecode.test.ts",
       "tests/runtime-cabi.test.ts",
       "tests/sdk.test.ts",
       "tests/release-artifacts.test.ts",
@@ -71,7 +74,9 @@ const SUITE: readonly Stage[] = [
       "tests/sdk-idf.test.ts",
       "tests/out-of-tree-rust.test.ts",
       "tests/applet.test.ts",
+      "tests/wifi-framework.test.ts",
       "tests/pocket-package.test.ts",
+      "tests/package-admission.test.ts",
       "tests/idf-host-profile.test.ts",
       "tests/idf-embed.test.ts",
       "tests/idf-incremental.test.ts",
@@ -106,7 +111,8 @@ const SUITE: readonly Stage[] = [
       "tests/3ds-native-install.test.ts",
       "tests/3ds-runtime-state.test.ts",
       "tests/3ds-transition.test.ts",
-      "tests/3ds-runtime-wire.test.ts",
+      "tests/3ds-bundle-compile.test.ts",
+      "tests/3ds-devmenu.test.ts",
       "tests/repack-3ds.test.ts",
       "tests/repack-shared.test.ts",
       "tests/repack-sfo.test.ts",
@@ -121,7 +127,9 @@ const SUITE: readonly Stage[] = [
       "tests/3ds-link.test.ts",
       "tests/camera-photo.test.ts",
       "tests/fs-3ds.test.ts",
-      "tests/pocket-input.test.ts",
+      "tests/worker.test.ts",
+      "tests/worker-native.test.ts",
+      "tests/worker-http-stream.test.ts",
       "tests/contact-latch.test.ts",
       "tests/compiler-portability.test.ts",
       "tests/platform-runtime.test.ts",
@@ -137,6 +145,7 @@ const SUITE: readonly Stage[] = [
       "tests/class-diagnostics.test.ts",
       "tests/vue-sfc.test.ts",
       "tests/font-bake.test.ts",
+      "tests/build-font-flags.test.ts",
       "tests/indexed-image.test.ts",
       "tests/svg-texture-size.test.ts",
       "tests/touch.test.ts",
@@ -148,10 +157,8 @@ const SUITE: readonly Stage[] = [
       "tests/osk-controller.test.ts",
       "tests/clear-keyboard-touch.test.ts",
       "tests/audio.test.ts",
-      "tests/db.test.ts",
       "tests/fs.test.ts",
       "tests/bytes.test.ts",
-      "tests/net.test.ts",
       "tests/offload.test.ts",
       "tests/offload-posix.test.ts",
       "tests/ime.test.ts",
@@ -160,27 +167,16 @@ const SUITE: readonly Stage[] = [
       "tests/text.test.ts",
       "tests/text-layout-client.test.ts",
       "tests/clear-candidate-panel.test.ts",
-      "tests/android-icon.test.ts",
-      "tests/android-platform.test.ts",
-      "tests/android-platform-integration.test.ts",
-      "tests/blackberry-classic.test.ts",
       "tests/device-program-build.test.ts",
       "tests/device-source-inputs.test.ts",
       "tests/ios-profile.test.ts",
-      "tests/iphone2g-device-contract.test.ts",
-      "tests/iphone2g-device-transaction.test.ts",
-      "tests/iphone2g-profile.test.ts",
-      "tests/iphone2g-toolchain.test.ts",
-      "tests/iphone4s-profile.test.ts",
       "tests/ipodtouch-profile.test.ts",
       "tests/ipodtouch4-installation.test.ts",
       "tests/ipodtouch4-profile.test.ts",
       "tests/ipodtouch4-resources.test.ts",
+      "tests/ipodtouch4-native.test.ts",
       "tests/ipodtouch4-svcwire.test.ts",
-      "tests/meizu-m8-profile.test.ts",
-      "tests/moto-g-play-profile.test.ts",
       "tests/nativescript-bridge.test.ts",
-      "tests/redmi-1s-profile.test.ts",
       "tests/repack-ipod.test.ts",
       "tests/symbian-data.test.ts",
       "tests/symbian-device.test.ts",
@@ -188,17 +184,14 @@ const SUITE: readonly Stage[] = [
       "tests/symbian-package.test.ts",
       "tests/symbian-runtime.test.ts",
       "tests/symbian-toolchain.test.ts",
-      "tests/repack-android.test.ts",
       "tests/repack-worker.test.ts",
       "tests/offload-provider.test.ts",
       "tests/companion-session.test.ts",
       "tests/pocket-link.test.ts",
-      "tests/pocket-agent.test.ts",
-      "tests/companion-youtube.test.ts",
-      "tests/companion-x.test.ts",
-      "tests/companion-glyphs.test.ts",
-      "tests/companion-services.test.ts",
-      "tests/companion-discord.test.ts",
+      "tests/pocket-link-2.test.ts",
+      "tests/pocket-link-2-reference.test.ts",
+      "tests/pocket-link-2-c.test.ts",
+      "tests/pocket-link-2-client.test.ts",
       "tests/resource-cache.test.ts",
       "tests/font-config.test.ts",
       "tests/font-archive.test.ts",
@@ -267,6 +260,7 @@ const SUITE: readonly Stage[] = [
       "tests/aot-differential.test.ts",
       "tests/microts-layout-baked.test.ts",
       "tests/solid-for.test.ts",
+      "tests/solid-viewport.test.ts",
       "tests/solid-aot-lab.test.ts",
       "tests/vue-vapor-frame-flush.test.ts",
     ],
@@ -281,7 +275,6 @@ const SUITE: readonly Stage[] = [
     ],
     tests: [
       "tests/aot-model-animation.test.ts",
-      "tests/aot-model-any.test.ts",
       "tests/aot-model-async-view.test.ts",
       "tests/aot-model-await-order.test.ts",
       "tests/aot-model-build-plan.test.ts",
@@ -295,11 +288,9 @@ const SUITE: readonly Stage[] = [
       "tests/aot-model-interp.test.ts",
       "tests/aot-model-js.test.ts",
       "tests/aot-model-metamorphic.test.ts",
-      "tests/aot-model-net-pump.test.ts",
       "tests/aot-model-private-fields.test.ts",
       "tests/aot-model-resources.test.ts",
       "tests/aot-model-scalars.test.ts",
-      "tests/aot-model-services.test.ts",
       "tests/aot-model-startup.test.ts",
       "tests/aot-model-tape.test.ts",
       "tests/aot-model-tasks.test.ts",
@@ -356,16 +347,20 @@ const SUITE: readonly Stage[] = [
     tests: ["tests/audio-sim.test.ts"],
   },
   {
-    name: "launcher sim",
-    prep: [["bun", "tools/launcher.ts", "covers"]],
+    // apps/nexus-touch on the wasm core at the iPod touch 4's 320x480 @2x,
+    // driven by a touch tape. The test builds its own guest from the
+    // ipodtouch4-dev plan.
+    name: "nexus-touch sim",
+    prep: [["bun", "tools/wasm.ts"]],
     browser: true,
-    tests: ["tests/launcher-sim.test.ts", "tests/launcher-symbian.test.ts", "tests/nexus-touch.test.ts"],
+    tests: ["tests/nexus-touch.test.ts"],
   },
   {
     // The system agent's overlay over a fixture app on the 3DS geometry, with
     // the agent fake (programs/sim/console-3ds.ts). The test builds its guest
-    // with `bun tools/3ds.ts --plan=... --pocket-only`. Pocket Home and the
-    // Hacker News app live in pocket-shell (shells/3ds) with their own sims.
+    // with `bun tools/3ds.ts --plan=... --pocket-only`. Pocket Shell lives in
+    // pocket-shell (shells/3ds) and the Hacker News applet in
+    // pocket-nexus/applets, each with its own sims.
     name: "agent overlay sim",
     prep: [
       ["bun", "tools/wasm.ts"],
@@ -382,8 +377,13 @@ const args = process.argv.slice(2);
 const stageFilter = args
   .find((a) => a.startsWith("--stage="))
   ?.slice("--stage=".length);
+const skipFilter = args
+  .find((a) => a.startsWith("--skip="))
+  ?.slice("--skip=".length);
 const selected = SUITE.filter(
-  (s) => !stageFilter || s.name.includes(stageFilter),
+  (s) =>
+    (!stageFilter || s.name.includes(stageFilter)) &&
+    (!skipFilter || !s.name.includes(skipFilter)),
 );
 
 if (args.includes("--list")) {
@@ -405,6 +405,10 @@ if (stageFilter && selected.length === 0) {
   console.error(`test: no stage matches "${stageFilter}" (see --list)`);
   process.exit(1);
 }
+if (skipFilter && !SUITE.some((s) => s.name.includes(skipFilter))) {
+  console.error(`test: no stage matches --skip="${skipFilter}" (see --list)`);
+  process.exit(1);
+}
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -422,6 +426,7 @@ for (const stage of selected) {
   for (const cmd of stage.prep ?? []) {
     const p = Bun.spawnSync(cmd as string[], {
       cwd: ROOT,
+      env: { ...process.env, ...stage.env },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -432,6 +437,7 @@ for (const stage of selected) {
   if (stage.script) {
     const p = Bun.spawnSync(stage.script as string[], {
       cwd: ROOT,
+      env: { ...process.env, ...stage.env },
       stdout: "inherit",
       stderr: "inherit",
     });
@@ -446,6 +452,7 @@ for (const stage of selected) {
     ];
     const p = Bun.spawnSync(cmd, {
       cwd: ROOT,
+      env: { ...process.env, ...stage.env },
       stdout: "inherit",
       stderr: "inherit",
     });
